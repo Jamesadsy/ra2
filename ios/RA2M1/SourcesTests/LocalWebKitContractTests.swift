@@ -46,42 +46,64 @@ final class LocalWebKitContractTests: XCTestCase {
         XCTAssertEqual(indexedDBAvailable, true, "Route B save/config storage requires IndexedDB.")
 
         let storeName = "ra2-m1-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
-        let wrote = try await webView.callAsyncJavaScript("""
-          const request = indexedDB.open('\(storeName)', 1);
-          request.onupgradeneeded = () => request.result.createObjectStore('state');
-          const database = await new Promise((resolve, reject) => {
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => resolve(request.result);
-          });
-          await new Promise((resolve, reject) => {
-            const transaction = database.transaction('state', 'readwrite');
-            transaction.objectStore('state').put('persisted', 'save-boundary');
-            transaction.oncomplete = resolve;
-            transaction.onerror = () => reject(transaction.error);
-          });
-          return 'written';
-          """, arguments: [:], in: nil, contentWorld: .page) as? String
+        let writeStarted = try await webView.evaluateJavaScript("""
+          (() => {
+            window.__ra2M1StorageWrite = 'pending';
+            const request = indexedDB.open('\(storeName)', 1);
+            request.onupgradeneeded = () => request.result.createObjectStore('state');
+            request.onerror = () => { window.__ra2M1StorageWrite = 'error'; };
+            request.onsuccess = () => {
+              const database = request.result;
+              const transaction = database.transaction('state', 'readwrite');
+              transaction.objectStore('state').put('persisted', 'save-boundary');
+              transaction.oncomplete = () => {
+                window.__ra2M1StorageWrite = 'written';
+                database.close();
+              };
+              transaction.onerror = () => { window.__ra2M1StorageWrite = 'error'; };
+            };
+            return 'started';
+          })()
+          """) as? String
+        XCTAssertEqual(writeStarted, "started")
+        let wrote = try await waitForString("window.__ra2M1StorageWrite", in: webView)
         XCTAssertEqual(wrote, "written")
 
         let lifecycle = RuntimeLifecycleCoordinator(webView: webView)
         lifecycle.applicationDidEnterBackground()
         lifecycle.applicationWillEnterForeground()
-        let retained = try await webView.callAsyncJavaScript("""
-          const request = indexedDB.open('\(storeName)', 1);
-          const database = await new Promise((resolve, reject) => {
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => resolve(request.result);
-          });
-          const retained = await new Promise((resolve, reject) => {
-            const transaction = database.transaction('state', 'readonly');
-            const value = transaction.objectStore('state').get('save-boundary');
-            value.onsuccess = () => resolve(value.result);
-            value.onerror = () => reject(value.error);
-          });
-          return retained;
-          """, arguments: [:], in: nil, contentWorld: .page) as? String
+        let readStarted = try await webView.evaluateJavaScript("""
+          (() => {
+            window.__ra2M1StorageRead = 'pending';
+            const request = indexedDB.open('\(storeName)', 1);
+            request.onerror = () => { window.__ra2M1StorageRead = 'error'; };
+            request.onsuccess = () => {
+              const database = request.result;
+              const transaction = database.transaction('state', 'readonly');
+              const value = transaction.objectStore('state').get('save-boundary');
+              value.onsuccess = () => {
+                window.__ra2M1StorageRead = typeof value.result === 'string' ? value.result : 'missing';
+                database.close();
+              };
+              value.onerror = () => { window.__ra2M1StorageRead = 'error'; };
+            };
+            return 'started';
+          })()
+          """) as? String
+        XCTAssertEqual(readStarted, "started")
+        let retained = try await waitForString("window.__ra2M1StorageRead", in: webView)
         XCTAssertEqual(retained, "persisted")
         XCTAssertTrue(lifecycle.webView === webView)
+    }
+
+    private func waitForString(_ expression: String, in webView: WKWebView) async throws -> String? {
+        for _ in 0..<100 {
+            if let value = try await webView.evaluateJavaScript(expression) as? String, value != "pending" {
+                return value
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return nil
     }
 }
 
