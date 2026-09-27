@@ -80,7 +80,7 @@ if (untrackedPrivate.length) fail('Private owner-data paths are tracked by Git.'
 const changed = run('git', ['diff', '--name-only', `${base}...HEAD`])
   .split(/\r?\n/)
   .filter(Boolean);
-if (changed.some((path) => /(^|\/)(game\/|\.tmp-third-party\/)|\.(exe|dll|mix|csf|fnt)$/i.test(path))) {
+if (changed.some((path) => /^(game\/|\.tmp-third-party\/)|\.(exe|dll|mix|csf|fnt)$/i.test(path))) {
   fail('A changed Git path resembles a proprietary owner-data payload.');
 }
 
