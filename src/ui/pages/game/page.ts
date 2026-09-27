@@ -39,6 +39,7 @@ import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import { loadStoredResolution } from './vmPageResolution';
 import type { GameResolution } from '../../../games/resolution';
+import { isEa108IosHost, loadEa108IosOwnerGameSource } from '../../../platform/browser/ea108MobileHost';
 
 let activeVm: VmShell | null = null;
 const pageController = new VmSessionController();
@@ -316,9 +317,13 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   presenter.render();
   // Restore and start directly from the last persisted complete import without showing the picker;
   // missing/incomplete caches, such as quota-reduced sets, return to the picker.
-  const cachedSource = await restoreCachedGameSource().catch(() => null);
-  if (generation !== pageGeneration) return;
-  gameSource = cachedSource ?? (await selectGameFiles());
+  if (isEa108IosHost()) {
+    gameSource = await loadEa108IosOwnerGameSource();
+  } else {
+    const cachedSource = await restoreCachedGameSource().catch(() => null);
+    if (generation !== pageGeneration) return;
+    gameSource = cachedSource ?? (await selectGameFiles());
+  }
   if (generation !== pageGeneration) {
     progressiveFilesOf(gameSource.files)?.cancel();
     return;

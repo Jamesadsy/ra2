@@ -7,12 +7,13 @@ import { AppShell } from './ui/pages/game/AppShell';
 import { createRoot } from 'react-dom/client';
 import { UiErrorBoundary } from './ui/shared/components/UiErrorBoundary';
 import { showEdgeMouseNotice } from './ui/pages/game/components/edgeMouseNotice';
+import { isEa108IosHost } from './platform/browser/ea108MobileHost';
 
 document.documentElement.lang = uiLocale;
 document.title = uiLocale === 'en' ? 'Red Alert 2 in your browser' : '红色警戒2 网页版';
 
 // Run alongside page-module initialization without waiting for package selection; startup reuses the cache or the same in-flight request.
-void preloadThirdPartyFiles(Object.values(GAME_MANIFESTS));
+if (!isEa108IosHost()) void preloadThirdPartyFiles(Object.values(GAME_MANIFESTS));
 
 // Page-lifetime navigation guard: keep accidental back/forward, mouse-side-button, and Alt+Left navigation on this page
 // (disable with ?nav-guard=0 for development). Install once, independently of VM lifetime.
@@ -20,7 +21,7 @@ installNavigationGuard();
 
 // PWA: register the service worker in production for browser installation eligibility; skip development
 // to avoid conflicting with no-cache/manual-refresh policies. Register after load to avoid competing with initial startup resources.
-if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+if (import.meta.env.PROD && 'serviceWorker' in navigator && !isEa108IosHost()) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch((error) => {
       console.warn('[PWA] 服务线程注册失败', error);

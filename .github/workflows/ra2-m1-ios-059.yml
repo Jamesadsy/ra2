@@ -1,0 +1,98 @@
+name: RA2 M1 iOS Host
+
+on:
+  push:
+    branches: [secondsun/ra2-m1-ios-059-ea108]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ra2-m1-ios-059-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apple-source-only:
+    name: iPhoneOS ARM64 compile, custody and lifecycle proof
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout source only
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.19.0
+
+      - name: Set up pinned pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+
+      - name: Show toolchain versions
+        run: |
+          node --version
+          pnpm --version
+          xcodebuild -version
+
+      - name: Install NASM
+        run: brew install nasm
+
+      - name: Install source dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify formatting and asset-free core
+        run: |
+          pnpm exec prettier --check \
+            .github/workflows/ra2-m1-ios-059.yml \
+            docs/RA2_M1_IOS_HANDOFF.md \
+            scripts/ios/preparePublicBundle.mjs scripts/ios/verifyAppleApp.mjs scripts/ios/verifySourceOnly.mjs \
+            src/adapter/runtime.ts src/adapter/vmProtocol.ts src/adapter/vmWorkerController.ts src/main.ts \
+            src/platform/browser/ea108MobileHost.ts src/platform/browser/files/directoryAccess.ts src/platform/browser/files/http.ts \
+            src/ui/pages/game/page.ts tests/basic/ciConfiguration.test.ts tests/basic/ea108MobileHost.test.ts \
+            tests/real-game/browser/ra2BrowserSmoke.mts
+          pnpm run check
+
+      - name: Install Chromium and verify touch host controls
+        run: |
+          pnpm exec playwright install chromium
+          pnpm run test:browser:touch-ui
+
+      - name: Assert public-only checkout
+        run: node scripts/ios/verifySourceOnly.mjs
+
+      - name: Bundle the public Route B runtime
+        run: node scripts/ios/preparePublicBundle.mjs
+
+      - name: Compile and link the unsigned iPhoneOS arm64 app
+        run: >-
+          xcodebuild -project ios/RA2M1/RA2M1.xcodeproj -scheme RA2M1
+          -configuration Release -sdk iphoneos -arch arm64
+          -derivedDataPath "$RUNNER_TEMP/ra2-m1-derived"
+          CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" build
+
+      - name: Run deterministic iOS host, custody, WebKit storage and lifecycle tests
+        run: |
+          SIMULATOR_ID="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; devices=json.load(sys.stdin)["devices"]; print(next(d["udid"] for runtime in devices.values() for d in runtime if d.get("isAvailable") and d.get("name", "").startswith("iPhone")))')"
+          xcodebuild test -project ios/RA2M1/RA2M1.xcodeproj -scheme RA2M1 \
+            -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/ra2-m1-derived" -resultBundlePath "$RUNNER_TEMP/RA2M1-tests.xcresult" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=""
+
+      - name: Package and verify unsigned owner-data-free artifacts
+        run: |
+          OUTPUT="$RUNNER_TEMP/ra2-m1-ios-artifacts"
+          APP="$RUNNER_TEMP/ra2-m1-derived/Build/Products/Release-iphoneos/RA2M1.app"
+          bash scripts/ios/package-ios-artifact.sh "$APP" "$OUTPUT"
+          node scripts/ios/verifyAppleApp.mjs "$APP" "$OUTPUT"
+          cat "$OUTPUT/apple-proof-manifest.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Apple proof artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ra2-m1-059-apple-proof
+          path: ${{ runner.temp }}/ra2-m1-ios-artifacts/*
+          if-no-files-found: error
+          retention-days: 30

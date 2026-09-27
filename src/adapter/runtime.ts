@@ -9,6 +9,7 @@ import {
   collectDirectoryOverlays,
   directoryHandleOf,
   directoryScopeOf,
+  httpOwnerDataTokenOf,
 } from '../platform/browser/files/directoryAccess';
 import { OverlayGameFileProvider } from '../resources/providers/overlay';
 import { ScopedGameFileProvider } from '../resources/providers/scoped';
@@ -131,7 +132,8 @@ export async function createVmShell(
       : { kind: 'directory', handle };
   } else {
     // Sources that are neither session-backed nor authorized directories retain the development HTTP backend.
-    provider = { kind: 'http' };
+    const ownerDataToken = httpOwnerDataTokenOf(source.files);
+    provider = { kind: 'http', ...(ownerDataToken ? { ownerDataToken } : {}) };
   }
   const config: VmInitConfig = {
     provider,

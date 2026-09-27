@@ -39,6 +39,8 @@ export class HttpGameFileProvider implements GameFileProvider {
   private cacheGeneration = 0;
   private readonly writeCache = new IndexedDbWriteCache();
 
+  constructor(readonly ownerDataToken?: string) {}
+
   invalidateCache(): void {
     this.rangeFallback = null;
     this.prefixes.clear();
@@ -83,7 +85,7 @@ export class HttpGameFileProvider implements GameFileProvider {
     if (listing && !listing.some((entry) => entry.toLowerCase() === name.toLowerCase())) return null;
     const url = gameFileUrl(normalized);
     if (!url) return null;
-    const response = await fetchGameResource(url);
+    const response = await this.fetchResource(url);
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
     return new Uint8Array(await response.arrayBuffer());
@@ -143,7 +145,7 @@ export class HttpGameFileProvider implements GameFileProvider {
   private async readHttpPrefix(normalized: string, maxBytes: number, generation: number): Promise<FilePrefix | null> {
     const url = gameFileUrl(normalized);
     if (!url) return null;
-    const response = await fetchGameResource(url, { headers: { Range: `bytes=0-${Math.max(0, maxBytes - 1)}` } });
+    const response = await this.fetchResource(url, { headers: { Range: `bytes=0-${Math.max(0, maxBytes - 1)}` } });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
     if (response.status === 200) {
@@ -170,7 +172,7 @@ export class HttpGameFileProvider implements GameFileProvider {
     const url = gameFileUrl(normalized);
     if (!url) return null;
     const end = Math.max(offset, offset + Math.max(0, length) - 1);
-    const response = await fetchGameResource(url, { headers: { Range: `bytes=${offset}-${end}` } });
+    const response = await this.fetchResource(url, { headers: { Range: `bytes=${offset}-${end}` } });
     if (response.status === 404 || response.status === 416) return null;
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
     if (response.status === 200) {
@@ -233,7 +235,7 @@ export class HttpGameFileProvider implements GameFileProvider {
     if (cached) return cached;
     const generation = this.cacheGeneration;
     const url = `/game/.list${directory ? `?dir=${encodeURIComponent(directory)}` : ''}`;
-    const request = fetchGameResource(url)
+    const request = this.fetchResource(url)
       .then(async (response) => {
         // A 404 from the listing endpoint means the directory is definitely absent; RA2 often probes virtual @:/ paths first.
         // This differs from network/endpoint failure. Cache an empty listing to reject all loose files below that directory synchronously.
@@ -248,6 +250,13 @@ export class HttpGameFileProvider implements GameFileProvider {
       });
     this.directoryListings.set(directory, request);
     return request;
+  }
+
+  private fetchResource(url: string, init?: RequestInit): Promise<Response> {
+    if (!this.ownerDataToken || !url.startsWith('/game/')) return fetchGameResource(url, init);
+    const headers = new Headers(init?.headers);
+    headers.set('X-RA2-Owner-Token', this.ownerDataToken);
+    return fetchGameResource(url, { ...init, headers });
   }
 }
 

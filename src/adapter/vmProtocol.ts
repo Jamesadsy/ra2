@@ -30,7 +30,7 @@ export interface VmInitConfig {
     | { kind: 'memory'; files: GameFileEntry[]; label: string }
     /** Two-stage loading: send the complete directory first, then read bytes through the port on demand; unextracted files wait for their producer. */
     | { kind: 'port'; port: MessagePort; names: string[]; label: string }
-    | { kind: 'http' };
+    | { kind: 'http'; ownerDataToken?: string };
   /** Selected game in a multi-game directory; the Worker uses this after rediscovery. */
   preferredGameId: SupportedGameId;
   /**

@@ -11,6 +11,9 @@ dist/
 .env*
 .tmp*
 .idea
+ios/RA2M1/Resources/Web/
+ios/RA2M1/build/
+*.xcresult
 # Do not commit local super-resolution weights or Python caches with source code.
 *.onnx
 *.onnx.data

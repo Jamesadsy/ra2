@@ -3,6 +3,7 @@ import { ScopedGameFileProvider } from '../../../resources/providers/scoped';
 import { OverlayGameFileProvider } from '../../../resources/providers/overlay';
 import { isSupportedGameId, type SupportedGameId } from '../../../games/catalog';
 import { DirectoryGameFileProvider } from './directory';
+import { HttpGameFileProvider } from './http';
 
 /**
  * Unwrap Scoped/Overlay providers to obtain the directory backend's FileSystemDirectoryHandle; return null for development HTTP/memory backends. In Worker mode, the main thread uses this to construct init.
@@ -38,6 +39,15 @@ export function directoryScopeOf(provider: GameFileProvider): string {
   }
   if (provider instanceof OverlayGameFileProvider) return directoryScopeOf(provider.parent);
   return '';
+}
+
+/** Resolve the runtime-only loopback owner-data capability through a wrapped HTTP source. */
+export function httpOwnerDataTokenOf(provider: GameFileProvider): string | undefined {
+  if (provider instanceof HttpGameFileProvider) return provider.ownerDataToken;
+  if (provider instanceof ScopedGameFileProvider || provider instanceof OverlayGameFileProvider) {
+    return httpOwnerDataTokenOf(provider.parent);
+  }
+  return undefined;
 }
 
 /** Forget the last directory so the player can choose another after native game exit. */

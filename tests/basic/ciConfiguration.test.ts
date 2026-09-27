@@ -3,6 +3,7 @@ import { expect, it } from 'vitest';
 
 const read = (file: string) => readFileSync(file, 'utf8').replaceAll('\r\n', '\n');
 const workflow = read('.github/workflows/quality-check.yml');
+const apple = read('.github/workflows/ra2-m1-ios-059.yml');
 const basic = workflow.split('  basic:\n')[1]!.split('  ra2:\n')[0]!;
 const ra2 = workflow.split('  ra2:\n')[1]!.split('  yr:\n')[0]!;
 const yr = workflow.split('  yr:\n')[1]!;
@@ -14,7 +15,7 @@ it('统一 CI 入口使用固定 action 与 pnpm，格式和无素材验收归 B
   expect(existsSync('pnpm-lock.yaml')).toBe(true);
   expect(existsSync('package-lock.json')).toBe(false);
   expect(existsSync('.gitea')).toBe(false);
-  expect(readdirSync('.github/workflows')).toEqual(['quality-check.yml']);
+  expect(readdirSync('.github/workflows').sort()).toEqual(['quality-check.yml', 'ra2-m1-ios-059.yml']);
   expect(basic).toContain('name: Basic test');
   expect(basic).toContain('pnpm run format:check');
   expect(basic).toContain('pnpm run ci:basic');
@@ -28,6 +29,18 @@ it('统一 CI 入口使用固定 action 与 pnpm，格式和无素材验收归 B
     expect(job.indexOf('actions/setup-node@')).toBeLessThan(job.indexOf('pnpm/action-setup@'));
   }
   for (const match of workflow.matchAll(/uses:\s+([^\s#]+)/g)) expect(match[1]).toMatch(/@[a-f0-9]{40}$/);
+});
+
+it('Apple proof is pinned to the implementation branch and builds a source-only unsigned iPhoneOS arm64 artifact', () => {
+  expect(apple).toContain('branches: [secondsun/ra2-m1-ios-059-ea108]');
+  expect(apple).toContain('runs-on: macos-15');
+  expect(apple).toContain('node-version: 24.19.0');
+  expect(apple).toContain('node scripts/ios/verifySourceOnly.mjs');
+  expect(apple).toContain('-sdk iphoneos -arch arm64');
+  expect(apple).toContain('CODE_SIGNING_ALLOWED=NO');
+  expect(apple).toContain('ra2-m1-059-apple-proof');
+  expect(apple).not.toMatch(/secrets\.|game\/ra2|ra2\.mix|binkw32\.dll/i);
+  for (const match of apple.matchAll(/uses:\s+([^\s#]+)/g)) expect(match[1]).toMatch(/@[a-f0-9]{40}$/);
 });
 
 it('PR 仅运行 Basic，素材凭据限定在可信分支的各自游戏步骤', () => {

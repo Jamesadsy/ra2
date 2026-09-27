@@ -368,7 +368,7 @@ export class VmWorkerController {
         true,
       );
     }
-    return new HttpGameFileProvider();
+    return new HttpGameFileProvider(config.provider.kind === 'http' ? config.provider.ownerDataToken : undefined);
   }
 
   private async handleInit(config: VmInitConfig): Promise<void> {
