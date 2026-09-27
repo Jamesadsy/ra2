@@ -8,7 +8,7 @@ trap 'rm -rf "$stage"' EXIT
 
 mkdir -p "$stage/Payload"
 ditto "$app_path" "$stage/Payload/RA2M1.app"
-(cd "$stage" && zip -X -qr "$output_path/RA2M1-iOS-arm64-unsigned.ipa" Payload)
-ditto -c -k --keepParent "$app_path" "$output_path/RA2M1-iOS-arm64-unsigned.app.zip"
+(cd "$stage" && zip -X -qr "$output_path/CnC-RA2-unsigned.ipa" Payload)
+ditto -c -k --keepParent "$app_path" "$output_path/CnC-RA2-unsigned.app.zip"
 
 echo "Packaged unsigned, owner-data-free IPA and app archive in $output_path"

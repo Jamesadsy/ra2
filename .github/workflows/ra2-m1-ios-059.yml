@@ -1,15 +1,15 @@
-name: RA2 M1 iOS Host
+name: CnC RA2 iOS Host
 
 on:
   push:
-    branches: [secondsun/ra2-m1-ios-059-ea108]
+    branches: [secondsun/ra2-m1-ios-059-ea108, secondsun/ra2-m1-ios-060-cnc-ra2-factory]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ra2-m1-ios-059-${{ github.ref }}
+  group: cnc-ra2-ios-060-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -109,7 +109,7 @@ jobs:
       - name: Upload Apple proof artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ra2-m1-059-apple-proof
+          name: cnc-ra2-060-apple-proof
           path: ${{ runner.temp }}/ra2-m1-ios-artifacts/*
           if-no-files-found: error
           retention-days: 30

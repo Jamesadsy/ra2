@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { extname, join, resolve } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -16,6 +16,9 @@ const fail = (message) => {
 };
 const plist = JSON.parse(run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(appPath, 'Info.plist')]));
 if (plist.CFBundleIdentifier !== 'org.second-sun.ra2m1') fail('Unexpected app bundle identifier.');
+if (plist.CFBundleDisplayName !== 'CnC RA2' || plist.CFBundleName !== 'CnC RA2') {
+  fail(`Expected CnC RA2 app display identity, got ${plist.CFBundleDisplayName}/${plist.CFBundleName}.`);
+}
 if (!plist.CFBundleSupportedPlatforms?.includes('iPhoneOS')) fail('The app bundle is not an iPhoneOS build.');
 if (
   await stat(appPath)
@@ -102,10 +105,12 @@ for (const path of files.sort()) {
   appHash.update(await hashFile(path));
 }
 const appBundleHash = appHash.digest('hex');
-const ipaSha256 = await hashFile(join(outputDirectory, 'RA2M1-iOS-arm64-unsigned.ipa'));
-const appArchiveSha256 = await hashFile(join(outputDirectory, 'RA2M1-iOS-arm64-unsigned.app.zip'));
+const ipaSha256 = await hashFile(join(outputDirectory, 'CnC-RA2-unsigned.ipa'));
+const appArchiveSha256 = await hashFile(join(outputDirectory, 'CnC-RA2-unsigned.app.zip'));
 const summary = {
-  artifact: 'RA2M1-iOS-arm64-unsigned',
+  artifact: 'CnC-RA2-unsigned',
+  displayName: plist.CFBundleDisplayName,
+  appBundleDirectoryName: basename(appPath),
   branch,
   head,
   tree,
