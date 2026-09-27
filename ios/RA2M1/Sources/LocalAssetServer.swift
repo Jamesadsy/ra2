@@ -41,7 +41,8 @@ final class LocalAssetServer {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: endpointPort)
         do {
-            let server = try NWListener(using: parameters, on: endpointPort)
+            // requiredLocalEndpoint already supplies both the loopback address and fixed port.
+            let server = try NWListener(using: parameters)
             listener = server
             server.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
             server.stateUpdateHandler = { state in

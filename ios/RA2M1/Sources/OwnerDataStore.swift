@@ -24,6 +24,8 @@ enum OwnerDataError: LocalizedError, Equatable {
     case executableHashMismatch
     case symbolicLink(String)
     case unsupportedEntry(String)
+    case backupExclusionFailed
+    case readOnlyProtectionFailed
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +41,10 @@ enum OwnerDataError: LocalizedError, Equatable {
             return "Owner data import rejected a symbolic link: \(path)."
         case .unsupportedEntry(let path):
             return "Owner data import rejected a non-file entry: \(path)."
+        case .backupExclusionFailed:
+            return "Owner data could not be excluded from device backup."
+        case .readOnlyProtectionFailed:
+            return "Owner data could not be made read-only."
         }
     }
 }
@@ -79,7 +85,7 @@ final class OwnerDataStore {
     @discardableResult
     func importFolder(_ sourceURL: URL) throws -> OwnerDataValidation {
         try fileManager.createDirectory(at: containerURL, withIntermediateDirectories: true)
-        excludeFromBackup(containerURL)
+        try excludeFromBackup(containerURL)
         let sourceValidation = try Self.validate(
             folder: sourceURL,
             expectedExecutableSHA256: expectedExecutableSHA256,
@@ -101,10 +107,13 @@ final class OwnerDataStore {
         if hadPrevious { try fileManager.moveItem(at: installedURL, to: backup) }
         do {
             try fileManager.moveItem(at: staging, to: installedURL)
-            setReadOnlyRecursively(installedURL)
-            excludeFromBackup(installedURL)
+            try excludeFromBackup(installedURL)
+            try setReadOnlyRecursively(installedURL)
         } catch {
-            if hadPrevious, !fileManager.fileExists(atPath: installedURL.path) {
+            if fileManager.fileExists(atPath: installedURL.path) {
+                removeReadOnlyTree(installedURL)
+            }
+            if hadPrevious {
                 try? fileManager.moveItem(at: backup, to: installedURL)
             }
             throw error
@@ -182,13 +191,14 @@ final class OwnerDataStore {
         }
     }
 
-    private func setReadOnlyRecursively(_ root: URL) {
+    private func setReadOnlyRecursively(_ root: URL) throws {
         let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey])
-        while let url = enumerator?.nextObject() as? URL {
+        guard let enumerator else { throw OwnerDataError.readOnlyProtectionFailed }
+        while let url = enumerator.nextObject() as? URL {
             let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            try? fileManager.setAttributes([.posixPermissions: isDirectory ? 0o555 : 0o444], ofItemAtPath: url.path)
+            try fileManager.setAttributes([.posixPermissions: isDirectory ? 0o555 : 0o444], ofItemAtPath: url.path)
         }
-        try? fileManager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        try fileManager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
     }
 
     private func removeReadOnlyTree(_ root: URL) {
@@ -201,10 +211,12 @@ final class OwnerDataStore {
         try? fileManager.removeItem(at: root)
     }
 
-    private func excludeFromBackup(_ url: URL) {
+    private func excludeFromBackup(_ url: URL) throws {
         var mutableURL = url
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
-        try? mutableURL.setResourceValues(values)
+        try mutableURL.setResourceValues(values)
+        let verified = try mutableURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+        guard verified == true else { throw OwnerDataError.backupExclusionFailed }
     }
 }
