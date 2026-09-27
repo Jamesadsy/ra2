@@ -58,6 +58,22 @@ jobs:
       - name: Install Chromium and verify touch host controls
         run: |
           pnpm exec playwright install chromium
+          pnpm run dev -- --host 127.0.0.1 --strictPort > "$RUNNER_TEMP/ra2-m1-vite.log" 2>&1 &
+          vite_pid=$!
+          for attempt in {1..60}; do
+            if curl --silent --insecure --fail https://127.0.0.1:15174/ > /dev/null; then
+              break
+            fi
+            if ! kill -0 "$vite_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/ra2-m1-vite.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if ! curl --silent --insecure --fail https://127.0.0.1:15174/ > /dev/null; then
+            cat "$RUNNER_TEMP/ra2-m1-vite.log"
+            exit 1
+          fi
           pnpm run test:browser:touch-ui
 
       - name: Assert public-only checkout
