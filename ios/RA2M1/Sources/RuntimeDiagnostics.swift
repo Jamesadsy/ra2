@@ -328,17 +328,19 @@ final class RuntimeDiagnosticsLog {
                 }
             }
         let routeLines = recentRoutes.suffix(12)
-        let contents = ([
+        var lines = [
             "CnC RA2 — last launch diagnostics",
             "startedUTC: \(Self.isoTimestamp(startedAt))",
             "lastAcknowledgedPhase: \(Self.sanitize(currentPhase, secret: ownerDataToken, limit: 120))",
-        ] + identity + [
-            "phaseTimeline:",
-        ] + phaseTimeline.suffix(18).map { "- \($0)" } + [
-            "recentLocalRoutes:",
-        ] + routeLines.map { "- \($0)" } + [
-            "lastError: \(lastError.map { Self.sanitize($0, secret: ownerDataToken, limit: 1200) } ?? "none")",
-        ]).joined(separator: "\n") + "\n"
+        ]
+        lines.append(contentsOf: identity)
+        lines.append("phaseTimeline:")
+        lines.append(contentsOf: phaseTimeline.suffix(18).map { "- \($0)" })
+        lines.append("recentLocalRoutes:")
+        lines.append(contentsOf: routeLines.map { "- \($0)" })
+        let errorText = lastError.map { Self.sanitize($0, secret: ownerDataToken, limit: 1200) } ?? "none"
+        lines.append("lastError: \(errorText)")
+        let contents = lines.joined(separator: "\n") + "\n"
         let summary = String(contents.prefix(12000))
         try? Data(summary.utf8).write(to: summaryURL, options: .atomic)
     }
