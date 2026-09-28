@@ -84,6 +84,11 @@ final class LocalAssetServer {
                 guard directory.isEmpty || directory.caseInsensitiveCompare("ra2") == .orderedSame else { return .badRequest }
                 return .directory(ownerDataRoot)
             }
+            if parts.count == 2, let canonicalName = OwnerDataContract.requiredFiles.first(where: {
+                $0.caseInsensitiveCompare(parts[1]) == .orderedSame
+            }) {
+                return .file(ownerDataRoot.appendingPathComponent(canonicalName), ownerData: true)
+            }
             guard parts.count >= 2, parts[1].caseInsensitiveCompare("ra2") == .orderedSame else { return .badRequest }
             if parts.count == 2 { return .directory(ownerDataRoot) }
             let dataPath = Array(parts.dropFirst(2))
@@ -126,9 +131,13 @@ final class LocalAssetServer {
         if parts.isEmpty || parts == ["index.html"] { return "public/index.html" }
         if parts.first == "game" {
             if parts.count == 2, parts[1] == ".list" { return "owner/.list" }
+            if parts.count == 2, OwnerDataContract.requiredFiles.contains(where: {
+                $0.caseInsensitiveCompare(parts[1]) == .orderedSame
+            }) {
+                return "owner/\(parts[1])"
+            }
             if parts.count == 3, parts[1] == "ra2" {
-                let allowed = Set(["game.exe", "ra2.mix", "language.mix", "binkw32.dll", "blowfish.dll",
-                                   "maps01.mix", "movies01.mix", "movies02.mix", "multi.mix", "theme.mix"])
+                let allowed = OwnerDataContract.requiredFiles.map { $0.lowercased() }
                 return allowed.contains(parts[2]) ? "owner/\(parts[2])" : "owner/other"
             }
             return "owner/other"

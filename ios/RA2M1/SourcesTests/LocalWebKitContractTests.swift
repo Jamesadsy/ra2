@@ -236,6 +236,16 @@ final class LocalWebKitContractTests: XCTestCase {
         let (ownerBytes, ownerResponse) = try await URLSession.shared.data(for: ownerRead)
         XCTAssertEqual((ownerResponse as? HTTPURLResponse)?.statusCode, 200)
         XCTAssertEqual(ownerBytes, Data([0x01, 0x02]))
+
+        let vmExecutableURL = try XCTUnwrap(URL(string: "/game/game.exe", relativeTo: server.origin)?.absoluteURL)
+        var vmExecutableRead = URLRequest(url: vmExecutableURL)
+        vmExecutableRead.setValue(token, forHTTPHeaderField: "X-RA2-Owner-Token")
+        let (vmExecutableBytes, vmExecutableResponse) = try await URLSession.shared.data(for: vmExecutableRead)
+        XCTAssertEqual((vmExecutableResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(vmExecutableBytes, Data([0x01, 0x02]))
+
+        let (_, unauthorizedVMResponse) = try await URLSession.shared.data(from: vmExecutableURL)
+        XCTAssertEqual((unauthorizedVMResponse as? HTTPURLResponse)?.statusCode, 404)
     }
 
     private func waitForString(_ expression: String, in webView: WKWebView) async throws -> String? {

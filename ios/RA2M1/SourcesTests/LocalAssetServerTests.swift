@@ -16,6 +16,8 @@ final class LocalAssetServerTests: XCTestCase {
         try Data("private".utf8).write(to: ownerFile)
 
         XCTAssertEqual(LocalAssetServer.resolve(target: "/assets/main.js", webRoot: web, ownerDataRoot: data), .file(publicFile, ownerData: false))
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/game.exe", webRoot: web, ownerDataRoot: data), .file(ownerFile, ownerData: true))
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/GaMe.ExE", webRoot: web, ownerDataRoot: data), .file(ownerFile, ownerData: true))
         XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/game.exe", webRoot: web, ownerDataRoot: data), .file(ownerFile, ownerData: true))
         XCTAssertEqual(LocalAssetServer.resolve(target: "/game/.list?dir=ra2", webRoot: web, ownerDataRoot: data), .directory(data))
         XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2", webRoot: web, ownerDataRoot: data), .directory(data))
@@ -38,6 +40,10 @@ final class LocalAssetServerTests: XCTestCase {
             LocalAssetServer.resolve(target: "/game/.list?dir=User", webRoot: root, ownerDataRoot: root.appendingPathComponent("Data")),
             .badRequest
         )
+        XCTAssertEqual(
+            LocalAssetServer.resolve(target: "/game/not-accepted.mix", webRoot: root, ownerDataRoot: root.appendingPathComponent("Data")),
+            .badRequest
+        )
     }
 
     func testByteRangesSupportOpenEndedAndSuffixFormsAndRejectMultipleRanges() throws {
@@ -58,6 +64,7 @@ final class LocalAssetServerTests: XCTestCase {
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/"), "public/index.html")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/assets/index-DfPGVsaw.js?cache=1"), "public/assets/index-dfpgvsaw.js")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/.list?dir=ra2&token=private"), "owner/.list")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/game.exe?token=private"), "owner/game.exe")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/ra2/game.exe?token=private"), "owner/game.exe")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/User/LastLaunchDiagnostics.txt"), "owner/other")
     }
