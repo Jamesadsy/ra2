@@ -14,15 +14,15 @@ final class LocalAssetServer {
     private static let maximumHeaderBytes = 64 * 1024
 
     let webRoot: URL
-    let ownerRoot: URL
+    let ownerDataRoot: URL
     let port: UInt16
     private let ownerDataToken: String
     private let queue = DispatchQueue(label: "org.second-sun.ra2m1.loopback")
     private var listener: NWListener?
 
-    init(webRoot: URL, ownerRoot: URL, port: UInt16 = productionPort, ownerDataToken: String = "") {
+    init(webRoot: URL, ownerDataRoot: URL, port: UInt16 = productionPort, ownerDataToken: String = "") {
         self.webRoot = webRoot
-        self.ownerRoot = ownerRoot
+        self.ownerDataRoot = ownerDataRoot
         self.port = port
         self.ownerDataToken = ownerDataToken
     }
@@ -67,7 +67,7 @@ final class LocalAssetServer {
         listener = nil
     }
 
-    static func resolve(target: String, webRoot: URL, ownerRoot: URL) -> LocalAssetRoute {
+    static func resolve(target: String, webRoot: URL, ownerDataRoot: URL) -> LocalAssetRoute {
         guard let components = URLComponents(string: "http://127.0.0.1\(target)"),
               let decodedPath = components.percentEncodedPath.removingPercentEncoding,
               !decodedPath.contains("\\"), !decodedPath.contains("\0") else {
@@ -80,10 +80,14 @@ final class LocalAssetServer {
             if parts.count == 2, parts[1] == ".list" {
                 let directory = components.queryItems?.first(where: { $0.name == "dir" })?.value ?? ""
                 guard safeComponents(directory.split(separator: "/").map(String.init)) else { return .badRequest }
-                return .directory(directory.isEmpty ? ownerRoot : append(directory.split(separator: "/").map(String.init), to: ownerRoot))
+                guard directory.isEmpty || directory.caseInsensitiveCompare("ra2") == .orderedSame else { return .badRequest }
+                return .directory(ownerDataRoot)
             }
-            guard parts.count > 1, safeComponents(Array(parts.dropFirst())) else { return .badRequest }
-            return .file(append(Array(parts.dropFirst()), to: ownerRoot), ownerData: true)
+            guard parts.count >= 2, parts[1].caseInsensitiveCompare("ra2") == .orderedSame else { return .badRequest }
+            if parts.count == 2 { return .directory(ownerDataRoot) }
+            let dataPath = Array(parts.dropFirst(2))
+            guard safeComponents(dataPath) else { return .badRequest }
+            return .file(append(dataPath, to: ownerDataRoot), ownerData: true)
         }
 
         let publicParts = parts.isEmpty ? ["index.html"] : parts
@@ -161,7 +165,7 @@ final class LocalAssetServer {
             requestHeaders[line[..<separator].lowercased()] = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
         }
 
-        let route = Self.resolve(target: target, webRoot: webRoot, ownerRoot: ownerRoot)
+        let route = Self.resolve(target: target, webRoot: webRoot, ownerDataRoot: ownerDataRoot)
         switch route {
         case .file(_, ownerData: true), .directory:
             guard Self.authorizesOwnerRequest(expectedToken: ownerDataToken, suppliedToken: requestHeaders["x-ra2-owner-token"]) else {

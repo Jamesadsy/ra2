@@ -7,14 +7,17 @@ enum OwnerDataContract {
         "game.exe",
         "ra2.mix",
         "language.mix",
-        "binkw32.dll",
-        "blowfish.dll",
-        "maps01.mix",
+        "BINKW32.DLL",
+        "Blowfish.dll",
+        "Maps01.mix",
         "movies01.mix",
         "movies02.mix",
-        "multi.mix",
-        "theme.mix",
+        "Multi.mix",
+        "Theme.mix",
     ]
+    static let documentsFolderName = "CnC RA2"
+    static let dataFolderName = "Data"
+    static let userFolderName = "User"
 }
 
 enum OwnerDataError: LocalizedError, Equatable {
@@ -23,28 +26,28 @@ enum OwnerDataError: LocalizedError, Equatable {
     case emptyFile(String)
     case executableHashMismatch
     case symbolicLink(String)
+    case duplicateEntry(String)
     case unsupportedEntry(String)
     case backupExclusionFailed
-    case readOnlyProtectionFailed
 
     var errorDescription: String? {
         switch self {
         case .notDirectory:
-            return "Select the extracted RA2 data folder containing game.exe."
+            return "The CnC RA2 Data location is not an ordinary folder."
         case .missingFiles(let names):
-            return "Required EA RA2 1.08 campaign files are missing: \(names.joined(separator: ", "))."
+            return "Validated RA2 M1 Data is incomplete. Missing: \(names.joined(separator: ", "))."
         case .emptyFile(let name):
             return "A required owner file is empty: \(name)."
         case .executableHashMismatch:
             return "The selected game.exe is not the accepted EA RA2 1.08 executable."
         case .symbolicLink(let path):
-            return "Owner data import rejected a symbolic link: \(path)."
+            return "Owner Data rejected a symbolic link: \(path)."
+        case .duplicateEntry(let path):
+            return "Owner Data rejected a case-insensitive duplicate: \(path)."
         case .unsupportedEntry(let path):
-            return "Owner data import rejected a non-file entry: \(path)."
+            return "Owner Data contains an entry outside the validated flat Data allowlist: \(path)."
         case .backupExclusionFailed:
-            return "Owner data could not be excluded from device backup."
-        case .readOnlyProtectionFailed:
-            return "Owner data could not be made read-only."
+            return "Owner Data could not be excluded from device backup."
         }
     }
 }
@@ -52,12 +55,14 @@ enum OwnerDataError: LocalizedError, Equatable {
 struct OwnerDataValidation: Equatable {
     let executableSHA256: String
     let fileCount: Int
+    let totalBytes: Int64
 }
 
-/// Keeps the retail install immutable and app-private; Route B's write cache remains in WKWebView IndexedDB.
+/// Exposes the Files-visible owner Data folder directly; User is reserved for writable player state.
 final class OwnerDataStore {
     let containerURL: URL
-    let installedURL: URL
+    let dataURL: URL
+    let userURL: URL
     private let fileManager: FileManager
     private let expectedExecutableSHA256: String
 
@@ -67,59 +72,31 @@ final class OwnerDataStore {
         expectedExecutableSHA256: String = OwnerDataContract.executableSHA256
     ) {
         self.containerURL = containerURL
-        self.installedURL = containerURL.appendingPathComponent("ra2", isDirectory: true)
+        self.dataURL = containerURL.appendingPathComponent(OwnerDataContract.dataFolderName, isDirectory: true)
+        self.userURL = containerURL.appendingPathComponent(OwnerDataContract.userFolderName, isDirectory: true)
         self.fileManager = fileManager
         self.expectedExecutableSHA256 = expectedExecutableSHA256.lowercased()
     }
 
     static func defaultContainerURL(fileManager: FileManager = .default) -> URL {
-        let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return support.appendingPathComponent("RA2/OwnerData", isDirectory: true)
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documents.appendingPathComponent(OwnerDataContract.documentsFolderName, isDirectory: true)
     }
 
-    func validateInstalled() throws -> OwnerDataValidation {
-        try Self.validate(folder: installedURL, expectedExecutableSHA256: expectedExecutableSHA256, fileManager: fileManager)
+    /// Creates the Files-visible roots without copying or importing owner data.
+    func prepareDocuments() throws {
+        try ensureDirectory(containerURL)
+        try ensureDirectory(dataURL)
+        try ensureDirectory(userURL)
+        try excludeFromBackup(dataURL)
     }
 
-    /// Validates before promotion, copies into a sibling staging directory, then atomically swaps the private owner set.
-    @discardableResult
-    func importFolder(_ sourceURL: URL) throws -> OwnerDataValidation {
-        try fileManager.createDirectory(at: containerURL, withIntermediateDirectories: true)
-        try excludeFromBackup(containerURL)
-        let sourceValidation = try Self.validate(
-            folder: sourceURL,
+    func validateData() throws -> OwnerDataValidation {
+        try Self.validate(
+            folder: dataURL,
             expectedExecutableSHA256: expectedExecutableSHA256,
             fileManager: fileManager
         )
-        let staging = containerURL.appendingPathComponent(".import-\(UUID().uuidString)", isDirectory: true)
-        let backup = containerURL.appendingPathComponent(".previous-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fileManager.removeItem(at: staging) }
-
-        try copyTree(from: sourceURL, to: staging)
-        let stagedValidation = try Self.validate(
-            folder: staging,
-            expectedExecutableSHA256: expectedExecutableSHA256,
-            fileManager: fileManager
-        )
-        guard stagedValidation == sourceValidation else { throw OwnerDataError.executableHashMismatch }
-
-        let hadPrevious = fileManager.fileExists(atPath: installedURL.path)
-        if hadPrevious { try fileManager.moveItem(at: installedURL, to: backup) }
-        do {
-            try fileManager.moveItem(at: staging, to: installedURL)
-            try excludeFromBackup(installedURL)
-            try setReadOnlyRecursively(installedURL)
-        } catch {
-            if fileManager.fileExists(atPath: installedURL.path) {
-                removeReadOnlyTree(installedURL)
-            }
-            if hadPrevious {
-                try? fileManager.moveItem(at: backup, to: installedURL)
-            }
-            throw error
-        }
-        if hadPrevious { removeReadOnlyTree(backup) }
-        return stagedValidation
     }
 
     static func validate(
@@ -131,29 +108,32 @@ final class OwnerDataStore {
         guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true else {
             throw OwnerDataError.notDirectory
         }
+
         let entries = try fileManager.contentsOfDirectory(
             at: folder,
             includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        )
+            options: []
+        ).sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
+        let allowedNames = Set(OwnerDataContract.requiredFiles.map { $0.lowercased() })
         var rootFiles: [String: URL] = [:]
-        var regularFileCount = 0
+        var totalBytes: Int64 = 0
+
         for entry in entries {
-            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
-            if values.isSymbolicLink == true { throw OwnerDataError.symbolicLink(entry.lastPathComponent) }
-            if values.isRegularFile == true {
-                regularFileCount += 1
-                rootFiles[entry.lastPathComponent.lowercased()] = entry
-            }
+            let name = entry.lastPathComponent
+            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey])
+            if values.isSymbolicLink == true { throw OwnerDataError.symbolicLink(name) }
+            guard values.isRegularFile == true else { throw OwnerDataError.unsupportedEntry(name) }
+
+            let key = name.lowercased()
+            guard allowedNames.contains(key) else { throw OwnerDataError.unsupportedEntry(name) }
+            guard rootFiles[key] == nil else { throw OwnerDataError.duplicateEntry(name) }
+            guard let size = values.fileSize, size > 0 else { throw OwnerDataError.emptyFile(name) }
+            rootFiles[key] = entry
+            totalBytes += Int64(size)
         }
 
-        let missing = OwnerDataContract.requiredFiles.filter { rootFiles[$0] == nil }
+        let missing = OwnerDataContract.requiredFiles.filter { rootFiles[$0.lowercased()] == nil }
         if !missing.isEmpty { throw OwnerDataError.missingFiles(missing) }
-        for name in OwnerDataContract.requiredFiles {
-            guard let file = rootFiles[name] else { continue }
-            let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            if size == 0 { throw OwnerDataError.emptyFile(name) }
-        }
         guard let executable = rootFiles["game.exe"] else {
             throw OwnerDataError.missingFiles(["game.exe"])
         }
@@ -162,53 +142,18 @@ final class OwnerDataStore {
             .joined()
         guard digest == expectedExecutableSHA256.lowercased() else { throw OwnerDataError.executableHashMismatch }
 
-        return OwnerDataValidation(executableSHA256: digest, fileCount: regularFileCount)
+        return OwnerDataValidation(executableSHA256: digest, fileCount: rootFiles.count, totalBytes: totalBytes)
     }
 
-    private func copyTree(from source: URL, to destination: URL) throws {
-        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-        let enumerator = fileManager.enumerator(
-            at: source,
-            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles]
-        )
-        while let item = enumerator?.nextObject() as? URL {
-            let values = try item.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
-            let relative = item.path.replacingOccurrences(of: source.path + "/", with: "")
-            guard !relative.hasPrefix("/") && !relative.split(separator: "/").contains("..") else {
-                throw OwnerDataError.unsupportedEntry(relative)
+    private func ensureDirectory(_ url: URL) throws {
+        if fileManager.fileExists(atPath: url.path) {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else {
+                throw OwnerDataError.notDirectory
             }
-            let target = destination.appendingPathComponent(relative)
-            if values.isSymbolicLink == true { throw OwnerDataError.symbolicLink(relative) }
-            if values.isDirectory == true {
-                try fileManager.createDirectory(at: target, withIntermediateDirectories: true)
-            } else if values.isRegularFile == true {
-                try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fileManager.copyItem(at: item, to: target)
-            } else {
-                throw OwnerDataError.unsupportedEntry(relative)
-            }
+            return
         }
-    }
-
-    private func setReadOnlyRecursively(_ root: URL) throws {
-        let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey])
-        guard let enumerator else { throw OwnerDataError.readOnlyProtectionFailed }
-        while let url = enumerator.nextObject() as? URL {
-            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            try fileManager.setAttributes([.posixPermissions: isDirectory ? 0o555 : 0o444], ofItemAtPath: url.path)
-        }
-        try fileManager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
-    }
-
-    private func removeReadOnlyTree(_ root: URL) {
-        let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey])
-        while let url = enumerator?.nextObject() as? URL {
-            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            try? fileManager.setAttributes([.posixPermissions: isDirectory ? 0o755 : 0o644], ofItemAtPath: url.path)
-        }
-        try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
-        try? fileManager.removeItem(at: root)
+        try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
     private func excludeFromBackup(_ url: URL) throws {

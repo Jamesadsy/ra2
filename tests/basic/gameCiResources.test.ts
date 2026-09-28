@@ -52,7 +52,11 @@ it('拒绝相对路径、缺资源及符号链接逃逸', async () => {
   await expect(inventoryResources({ game: join(base, 'missing'), thirdParty: base })).rejects.toThrow();
   await mkdir(join(base, 'game'));
   await mkdir(join(base, 'thirdParty'));
-  await symlink(join(base, 'thirdParty'), join(base, 'game', 'escape'), 'dir');
+  await symlink(
+    join(base, 'thirdParty'),
+    join(base, 'game', 'escape'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
   await expect(inventoryResources({ game: join(base, 'game'), thirdParty: join(base, 'thirdParty') })).rejects.toThrow(
     '符号链接',
   );

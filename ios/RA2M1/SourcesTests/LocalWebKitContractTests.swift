@@ -9,13 +9,13 @@ final class LocalWebKitContractTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let webRoot = root.appendingPathComponent("Web", isDirectory: true)
-        let ownerRoot = root.appendingPathComponent("OwnerData", isDirectory: true)
+        let ownerDataRoot = root.appendingPathComponent("Documents/CnC RA2/Data", isDirectory: true)
         try FileManager.default.createDirectory(at: webRoot, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: ownerRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ownerDataRoot, withIntermediateDirectories: true)
         try Data("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>ready".utf8)
             .write(to: webRoot.appendingPathComponent("index.html"))
 
-        let server = LocalAssetServer(webRoot: webRoot, ownerRoot: ownerRoot, port: LocalAssetServer.productionPort + 1)
+        let server = LocalAssetServer(webRoot: webRoot, ownerDataRoot: ownerDataRoot, port: LocalAssetServer.productionPort + 1)
         let ready = expectation(description: "loopback listener ready")
         var startupError: Error?
         server.start { result in

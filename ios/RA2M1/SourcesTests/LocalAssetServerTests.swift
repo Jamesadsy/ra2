@@ -7,24 +7,37 @@ final class LocalAssetServerTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let web = root.appendingPathComponent("Web", isDirectory: true)
-        let owners = root.appendingPathComponent("OwnerData", isDirectory: true)
+        let data = root.appendingPathComponent("Documents/CnC RA2/Data", isDirectory: true)
         let publicFile = web.appendingPathComponent("assets/main.js")
-        let ownerFile = owners.appendingPathComponent("ra2/game.exe")
+        let ownerFile = data.appendingPathComponent("game.exe")
         try FileManager.default.createDirectory(at: publicFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: ownerFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("public".utf8).write(to: publicFile)
         try Data("private".utf8).write(to: ownerFile)
 
-        XCTAssertEqual(LocalAssetServer.resolve(target: "/assets/main.js", webRoot: web, ownerRoot: owners), .file(publicFile, ownerData: false))
-        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/game.exe", webRoot: web, ownerRoot: owners), .file(ownerFile, ownerData: true))
-        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/.list?dir=ra2", webRoot: web, ownerRoot: owners), .directory(owners.appendingPathComponent("ra2", isDirectory: false)))
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/assets/main.js", webRoot: web, ownerDataRoot: data), .file(publicFile, ownerData: false))
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/game.exe", webRoot: web, ownerDataRoot: data), .file(ownerFile, ownerData: true))
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/.list?dir=ra2", webRoot: web, ownerDataRoot: data), .directory(data))
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2", webRoot: web, ownerDataRoot: data), .directory(data))
     }
 
     func testEncodedAndPlainTraversalAreRejected() {
         let root = FileManager.default.temporaryDirectory
         for target in ["/game/../secret", "/game/%2e%2e/secret", "/%2e%2e/private", "/game/ra2/%5c..%5csecret"] {
-            XCTAssertEqual(LocalAssetServer.resolve(target: target, webRoot: root, ownerRoot: root), .badRequest, target)
+            XCTAssertEqual(LocalAssetServer.resolve(target: target, webRoot: root, ownerDataRoot: root), .badRequest, target)
         }
+    }
+
+    func testOwnerRouteCannotReachSiblingUserData() {
+        let root = FileManager.default.temporaryDirectory
+        XCTAssertEqual(
+            LocalAssetServer.resolve(target: "/game/User/game.exe", webRoot: root, ownerDataRoot: root.appendingPathComponent("Data")),
+            .badRequest
+        )
+        XCTAssertEqual(
+            LocalAssetServer.resolve(target: "/game/.list?dir=User", webRoot: root, ownerDataRoot: root.appendingPathComponent("Data")),
+            .badRequest
+        )
     }
 
     func testByteRangesSupportOpenEndedAndSuffixFormsAndRejectMultipleRanges() throws {

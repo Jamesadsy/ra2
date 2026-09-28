@@ -320,6 +320,26 @@ export class WebAudioPcmSink {
     };
   }
 
+  /** Read-only playback progress for the private browser regression harness. */
+  getProgressSnapshot() {
+    return {
+      contextState: this.context?.state ?? 'uncreated',
+      contextTimeSeconds: this.context?.currentTime ?? null,
+      buffers: [...this.buffers.entries()].map(([id, state]) => ({
+        id,
+        byteLength: state.pcm.byteLength,
+        positionBytes: this.currentPosition(state),
+        playing: state.playing,
+        loop: state.loop,
+        sampleRate: state.format.nSamplesPerSec,
+        blockAlign: state.format.nBlockAlign,
+        worklet: state.worklet !== null,
+        scriptStream: state.stream !== null,
+        source: state.source !== null,
+      })),
+    };
+  }
+
   releaseBuffer(id: PcmBufferId): boolean {
     const state = this.buffers.get(id);
     if (!state) return false;

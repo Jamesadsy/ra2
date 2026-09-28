@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { request } from 'node:https';
+import { join, resolve } from 'node:path';
 import { chromium, type Locator, type Page } from '@playwright/test';
+import { assessBriefingAudioHealth } from './briefingAudioHealth';
 
 const ORIGIN = process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174';
 const MENU_FRAME_SAMPLES = 6;
@@ -10,6 +12,9 @@ const GAME_ID = process.env.RA2_BROWSER_GAME === 'yr' ? 'yr' : 'ra2';
 const IOS_HOST_MODE = process.env.RA2_BROWSER_IOS_HOST === '1';
 const GAME_LABEL = GAME_ID === 'yr' ? 'RA2YR' : 'RA2';
 const EXECUTABLE = GAME_ID === 'yr' ? 'gamemd.exe' : 'game.exe';
+const GAME_ROOT = resolve(process.env.RA2_GAME_ROOT || 'game');
+const GAME_ASSET_RESPONSES: Array<{ path: string; status: number }> = [];
+const GAME_ASSET_FAILURES: Array<{ path: string; error: string }> = [];
 // clickLogical takes normalized 1440x900 coordinates; RA2 and YR sidebars have different actual horizontal positions.
 const MAIN_SINGLE_PLAYER: readonly [number, number] = GAME_ID === 'yr' ? [1288, 330] : [1034, 371];
 const SINGLE_PLAYER_BACK: readonly [number, number] = GAME_ID === 'yr' ? [1288, 830] : [1034, 708];
@@ -334,6 +339,7 @@ async function probeCampaignVideo(
   opensBefore: number,
   closesBefore: number,
   audioBefore: Record<string, number>,
+  binkBefore: Record<string, number>,
 ): Promise<void> {
   try {
     await page.waitForFunction(
@@ -362,6 +368,23 @@ async function probeCampaignVideo(
   let maxBinkWaitCalls = 0;
   let maxSoundPositionCalls = 0;
   let maxBatchCalls = 0;
+  const startedAt = Date.now();
+  const audioSamples: Array<{
+    contextState: string;
+    contextTimeSeconds: number | null;
+    buffers: Array<{
+      id: number;
+      byteLength: number;
+      positionBytes: number;
+      playing: boolean;
+      loop: boolean;
+      sampleRate: number;
+      blockAlign: number;
+      worklet: boolean;
+      scriptStream: boolean;
+      source: boolean;
+    }>;
+  } | null> = [];
   for (let sample = 0; sample < 32; sample++) {
     hashes.add(
       (await canvas.getAttribute('data-vm-frame-sample')) ?? `frame:${await canvas.getAttribute('data-vm-frame')}`,
@@ -379,7 +402,78 @@ async function probeCampaignVideo(
         batch.hot.find(([key]) => key === 'DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition')?.[1] ?? 0,
       );
     }
+    audioSamples.push(
+      await page.evaluate(() => {
+        const probe = (
+          window as Window & {
+            __RA2AudioProgressProbe?: () => {
+              contextState: string;
+              contextTimeSeconds: number | null;
+              buffers: Array<{
+                id: number;
+                byteLength: number;
+                positionBytes: number;
+                playing: boolean;
+                loop: boolean;
+                sampleRate: number;
+                blockAlign: number;
+                worklet: boolean;
+                scriptStream: boolean;
+                source: boolean;
+              }>;
+            };
+          }
+        ).__RA2AudioProgressProbe;
+        return probe?.() ?? null;
+      }),
+    );
     await page.waitForTimeout(250);
+  }
+  const audioTimes = audioSamples
+    .filter((sample): sample is NonNullable<typeof sample> => sample !== null)
+    .map((sample) => sample.contextTimeSeconds)
+    .filter((time): time is number => time !== null);
+  const bufferSamples = audioSamples.flatMap((sample) => sample?.buffers ?? []).filter((buffer) => buffer.playing);
+  const activeBufferIds = [...new Set(bufferSamples.map((buffer) => buffer.id))];
+  const advancingBufferIds = activeBufferIds.filter((id) => {
+    const positions = audioSamples
+      .map((sample) => sample?.buffers.find((buffer) => buffer.id === id))
+      .filter((buffer): buffer is NonNullable<typeof buffer> => buffer?.playing === true)
+      .map((buffer) => buffer.positionBytes);
+    return new Set(positions).size >= 4;
+  });
+  const audioContextState = audioSamples.filter((sample) => sample !== null).at(-1)?.contextState ?? 'unavailable';
+  const audioClockStart = audioTimes[0] ?? null;
+  const audioClockEnd = audioTimes.at(-1) ?? null;
+  const audioClockDelta = audioClockStart !== null && audioClockEnd !== null ? audioClockEnd - audioClockStart : 0;
+  const audioHealth = assessBriefingAudioHealth({
+    elapsedMs: Date.now() - startedAt,
+    contextState: audioContextState,
+    contextTimeStartSeconds: audioClockStart,
+    contextTimeEndSeconds: audioClockEnd,
+    advancingPlayingBuffers: advancingBufferIds.length,
+    peakCursorPollsPer500Ms: maxSoundPositionCalls,
+  });
+  const binkAfter = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
+  const audioAfter = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
+  const asset404s = [...new Set(GAME_ASSET_RESPONSES.filter((response) => response.status >= 400).map((r) => r.path))];
+  const assetFailures = [...new Set(GAME_ASSET_FAILURES.map((failure) => `${failure.path}: ${failure.error}`))];
+  console.log(
+    `🔬 A/B brief probe: elapsed=${Date.now() - startedAt}ms，canvasHashes=${hashes.size}/32，` +
+      `VMFrames=${await canvas.getAttribute('data-vm-frame')}，` +
+      `BinkNextFrameΔ=${(binkAfter['BINKW32.DLL!_BinkNextFrame@4'] ?? 0) - (binkBefore['BINKW32.DLL!_BinkNextFrame@4'] ?? 0)}，` +
+      `BinkDoFrameΔ=${(binkAfter['BINKW32.DLL!_BinkDoFrame@4'] ?? 0) - (binkBefore['BINKW32.DLL!_BinkDoFrame@4'] ?? 0)}，` +
+      `BinkCopyToBufferΔ=${(binkAfter['BINKW32.DLL!_BinkCopyToBuffer@28'] ?? 0) - (binkBefore['BINKW32.DLL!_BinkCopyToBuffer@28'] ?? 0)}，` +
+      `BinkWaitMax=${maxBinkWaitCalls}/500ms，GetCurrentPositionMax=${maxSoundPositionCalls}/500ms，` +
+      `batchMax=${maxBatchCalls}/500ms，AudioContext=${audioContextState} Δt=${audioClockDelta.toFixed(3)}s，` +
+      `activeBuffers=${activeBufferIds.length} advancingBuffers=${advancingBufferIds.length}，` +
+      `cursorPolls=${audioHealth.cursorPollsPerAudioSecond.toFixed(0)}/audio-s，` +
+      `CreateBufferΔ=${(audioAfter['DSOUND.COM!IDirectSound.CreateSoundBuffer'] ?? 0) - (audioBefore['DSOUND.COM!IDirectSound.CreateSoundBuffer'] ?? 0)}，` +
+      `PlayΔ=${(audioAfter['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0) - (audioBefore['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0)}，` +
+      `asset4xx=${asset404s.length} assetFailures=${assetFailures.length}`,
+  );
+  if (asset404s.length || assetFailures.length) {
+    console.log(`🔬 A/B game asset misses: ${JSON.stringify({ asset404s, assetFailures })}`);
   }
   assert(hashes.size >= 12, `战役过场没有持续播放：32 次采样只有 ${hashes.size} 张画面`);
   assert(
@@ -387,10 +481,12 @@ async function probeCampaignVideo(
     `战役过场 BinkWait 仍在宿主 hypercall 自旋：最高 ${maxBinkWaitCalls}/500ms，总调用 ${maxBatchCalls}/500ms`,
   );
   assert(
-    maxSoundPositionCalls < 250,
-    `战役过场声音游标跨线程轮询过载：最高 ${maxSoundPositionCalls}/500ms，总调用 ${maxBatchCalls}/500ms`,
+    audioHealth.passed,
+    `战役 briefing 音频未通过实际进度/非 runaway 健康契约：` +
+      `context=${audioContextState}，时钟Δ=${audioHealth.audioClockDeltaSeconds.toFixed(3)}s，` +
+      `推进缓冲=${advancingBufferIds.length}，游标查询=${audioHealth.cursorPollsPerAudioSecond.toFixed(0)}/音频秒，` +
+      `失败=${audioHealth.failures.join(',')}`,
   );
-  const audioAfter = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
   const buffersBefore = audioBefore['DSOUND.COM!IDirectSound.CreateSoundBuffer'] ?? 0;
   const buffersAfter = audioAfter['DSOUND.COM!IDirectSound.CreateSoundBuffer'] ?? 0;
   const playsBefore = audioBefore['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
@@ -530,8 +626,8 @@ async function probeMainMenu(
   };
 }
 
-assert(existsSync(`game/ra2/${EXECUTABLE}`), `缺少 game/ra2/${EXECUTABLE}`);
-assert(existsSync('game/ra2/BINKW32.DLL'), '缺少 game/ra2/BINKW32.DLL');
+assert(existsSync(join(GAME_ROOT, 'ra2', EXECUTABLE)), `RA2_GAME_ROOT 缺少 ra2/${EXECUTABLE}`);
+assert(existsSync(join(GAME_ROOT, 'ra2', 'BINKW32.DLL')), 'RA2_GAME_ROOT 缺少 ra2/BINKW32.DLL');
 if (IOS_HOST_MODE) assert.equal(GAME_ID, 'ra2', 'iOS private owner mode only supports RA2');
 
 const server = await ensureServer();
@@ -561,6 +657,18 @@ try {
   );
   const page = await context.newPage();
   const pageErrors: string[] = [];
+  page.on('response', (response) => {
+    const url = new URL(response.url());
+    if (url.pathname.toLowerCase().startsWith('/game/ra2/')) {
+      GAME_ASSET_RESPONSES.push({ path: url.pathname, status: response.status() });
+    }
+  });
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.toLowerCase().startsWith('/game/ra2/')) {
+      GAME_ASSET_FAILURES.push({ path: url.pathname, error: request.failure()?.errorText ?? 'unknown' });
+    }
+  });
   page.on('pageerror', (error) => {
     const detail = error.stack ?? error.message;
     pageErrors.push(detail);
@@ -673,10 +781,9 @@ try {
   await clickUntilShellPage(page, canvas, 'campaign', ...SINGLE_PLAYER_CAMPAIGN);
   await page.waitForTimeout(1_000);
   await probeCampaignHover(page, canvas, campaignHoverPlayBefore);
-  const campaignVideoOpensBefore =
-    callsOf(await canvas.getAttribute('data-vm-bink-calls'))['BINKW32.DLL!_BinkOpen@8'] ?? 0;
-  const campaignVideoClosesBefore =
-    callsOf(await canvas.getAttribute('data-vm-bink-calls'))['BINKW32.DLL!_BinkClose@4'] ?? 0;
+  const campaignVideoBinkBefore = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
+  const campaignVideoOpensBefore = campaignVideoBinkBefore['BINKW32.DLL!_BinkOpen@8'] ?? 0;
+  const campaignVideoClosesBefore = campaignVideoBinkBefore['BINKW32.DLL!_BinkClose@4'] ?? 0;
   const campaignVideoAudioBefore = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
   // Leaving the shell means entering the campaign briefing, not necessarily the battlefield. Wait for both the sidebar and
   // map to render before checking Pointer Lock. Click only once per round, then wait for the original game to finish
@@ -711,7 +818,14 @@ try {
     }
   }
   assert.equal(await canvas.getAttribute('data-shell-page'), null, '选择盟军后仍停在 CampaignMenu');
-  await probeCampaignVideo(page, canvas, campaignVideoOpensBefore, campaignVideoClosesBefore, campaignVideoAudioBefore);
+  await probeCampaignVideo(
+    page,
+    canvas,
+    campaignVideoOpensBefore,
+    campaignVideoClosesBefore,
+    campaignVideoAudioBefore,
+    campaignVideoBinkBefore,
+  );
   const battlefieldVideoBinkBefore = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
   const battlefieldVideoAudioBefore = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
   // YR keeps the shell/campaign briefing at 800x600 and reads RA2MD.INI to switch to the selected mode only on

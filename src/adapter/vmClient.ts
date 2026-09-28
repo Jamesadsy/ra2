@@ -17,6 +17,8 @@ import type { GameResolution } from '../games/resolution';
 const PROBE_TIMEOUT_MS = 3000;
 const REQUEST_TIMEOUT_MS = 10000;
 const STARTUP_TIMEOUT_MS = 120000;
+type AudioProgressProbe = () => ReturnType<WebAudioPcmSink['getProgressSnapshot']>;
+type AudioProgressWindow = Window & { __RA2AudioProgressProbe?: AudioProgressProbe };
 
 export interface WorkerVmClientOptions {
   /** Release host-owned session resources when the Worker terminates normally or exits unexpectedly. */
@@ -58,6 +60,7 @@ export class WorkerVmClient implements VmShell {
   private readonly worker: Worker;
   private readonly onTerminated: (() => void) | undefined;
   private readonly audio: WebAudioPcmSink;
+  private readonly audioProgressProbe: AudioProgressProbe | null;
   private readonly requests = new Map<number, PendingRequest>();
   private readonly callbacks: GameVmCallbacks;
   private readonly initConfig: VmInitConfig;
@@ -91,6 +94,12 @@ export class WorkerVmClient implements VmShell {
         onError: (error) => console.warn('[VM audio]', error),
         diagnosticsIntervalMs: AUDIO_DIAGNOSTICS_INTERVAL_MS,
       });
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location?.search ?? '').get('debug') === '1') {
+      this.audioProgressProbe = () => this.audio.getProgressSnapshot();
+      (window as AudioProgressWindow).__RA2AudioProgressProbe = this.audioProgressProbe;
+    } else {
+      this.audioProgressProbe = null;
+    }
     this.worker =
       options.workerFactory?.() ?? new Worker(new URL('./vmWorker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
@@ -445,6 +454,10 @@ export class WorkerVmClient implements VmShell {
     this.worker.onmessageerror = null;
     this.worker.terminate();
     this.onTerminated?.();
+    if (this.audioProgressProbe && typeof window !== 'undefined') {
+      const debugWindow = window as AudioProgressWindow;
+      if (debugWindow.__RA2AudioProgressProbe === this.audioProgressProbe) delete debugWindow.__RA2AudioProgressProbe;
+    }
     await this.audio.destroy();
     const reason = this.lifecycleError();
     for (const request of this.requests.values()) request.reject(reason);

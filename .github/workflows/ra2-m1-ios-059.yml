@@ -2,14 +2,17 @@ name: CnC RA2 iOS Host
 
 on:
   push:
-    branches: [secondsun/ra2-m1-ios-059-ea108, secondsun/ra2-m1-ios-060-cnc-ra2-factory]
+    branches:
+      - secondsun/ra2-m1-ios-059-ea108
+      - secondsun/ra2-m1-ios-060-cnc-ra2-factory
+      - secondsun/ra2-m1-ios-061-data-user-stage
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: cnc-ra2-ios-060-${{ github.ref }}
+  group: cnc-ra2-ios-062-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -51,8 +54,10 @@ jobs:
             docs/RA2_M1_IOS_HANDOFF.md \
             scripts/ios/preparePublicBundle.mjs scripts/ios/verifyAppleApp.mjs scripts/ios/verifySourceOnly.mjs \
             src/adapter/runtime.ts src/adapter/vmProtocol.ts src/adapter/vmWorkerController.ts src/main.ts \
+            src/adapter/audio.ts src/adapter/vmClient.ts \
             src/platform/browser/ea108MobileHost.ts src/platform/browser/files/directoryAccess.ts src/platform/browser/files/http.ts \
             src/ui/pages/game/page.ts tests/basic/ciConfiguration.test.ts tests/basic/ea108MobileHost.test.ts \
+            tests/basic/briefingAudioHealth.test.ts tests/real-game/browser/briefingAudioHealth.ts \
             tests/real-game/browser/ra2BrowserSmoke.mts
           pnpm run check
 
@@ -109,7 +114,7 @@ jobs:
       - name: Upload Apple proof artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: cnc-ra2-060-apple-proof
+          name: cnc-ra2-062-apple-proof
           path: ${{ runner.temp }}/ra2-m1-ios-artifacts/*
           if-no-files-found: error
           retention-days: 30

@@ -4,61 +4,102 @@ import XCTest
 @testable import RA2M1
 
 final class OwnerDataStoreTests: XCTestCase {
-    func testAcceptedExecutablePinIsTheChairmanEA108Digest() {
+    func testAcceptedExecutablePinAndFlatDeviceAllowlist() {
         XCTAssertEqual(OwnerDataContract.executableSHA256, "6fc4b410f8841ba3ad6c57b59fccae65f58a8871d86750af3c1e2d5a7c5ad39d")
         XCTAssertEqual(OwnerDataContract.requiredFiles.count, 10)
+        XCTAssertEqual(Set(OwnerDataContract.requiredFiles.map { $0.lowercased() }).count, 10)
     }
 
-    func testCompleteFixtureImportsAtomicallyAsReadOnlyAppPrivateData() throws {
+    func testSetupCreatesFilesVisibleDataAndSeparateUserFolders() throws {
         let directory = try temporaryDirectory()
         defer { cleanUp(directory) }
-        let source = directory.appendingPathComponent("source", isDirectory: true)
-        let bytes = try makeValidOwnerFolder(at: source)
+        let documents = directory.appendingPathComponent("Documents", isDirectory: true)
+        let store = OwnerDataStore(containerURL: documents.appendingPathComponent("CnC RA2", isDirectory: true))
+
+        try store.prepareDocuments()
+
+        XCTAssertEqual(store.dataURL.lastPathComponent, "Data")
+        XCTAssertEqual(store.userURL.lastPathComponent, "User")
+        XCTAssertEqual(store.dataURL.deletingLastPathComponent(), store.userURL.deletingLastPathComponent())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.dataURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.userURL.path))
+        XCTAssertTrue(try store.dataURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.userURL.path), [])
+    }
+
+    func testValidatedDataIsReadInPlaceAndNeverImportedToHiddenSupport() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanUp(directory) }
         let store = OwnerDataStore(
-            containerURL: directory.appendingPathComponent("Application Support/RA2/OwnerData", isDirectory: true),
-            expectedExecutableSHA256: digest(bytes)
+            containerURL: directory.appendingPathComponent("Documents/CnC RA2", isDirectory: true),
+            expectedExecutableSHA256: digest(Data("fixture executable".utf8))
         )
+        try store.prepareDocuments()
+        let fixtureBytes = try makeValidOwnerFolder(at: store.dataURL)
 
-        let imported = try store.importFolder(source)
+        let validated = try store.validateData()
 
-        XCTAssertEqual(imported.executableSHA256, digest(bytes))
-        XCTAssertEqual(imported.fileCount, OwnerDataContract.requiredFiles.count)
-        XCTAssertEqual(try store.validateInstalled(), imported)
-        let permissions = try FileManager.default.attributesOfItem(atPath: store.installedURL.appendingPathComponent("ra2.mix").path)[.posixPermissions] as? Int
-        XCTAssertEqual(permissions, 0o444)
-        XCTAssertTrue(try store.installedURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        XCTAssertEqual(validated.executableSHA256, digest(fixtureBytes))
+        XCTAssertEqual(validated.fileCount, OwnerDataContract.requiredFiles.count)
+        XCTAssertGreaterThan(validated.totalBytes, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.dataURL.appendingPathComponent("game.exe").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("Application Support/RA2/OwnerData").path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.userURL.path), [])
     }
 
-    func testIncompleteOrWrongExecutableImportCannotReplaceAcceptedPrivateSet() throws {
+    func testIncompleteDataFailsClosedWithDeterministicMissingFiles() throws {
         let directory = try temporaryDirectory()
         defer { cleanUp(directory) }
-        let source = directory.appendingPathComponent("source", isDirectory: true)
-        let acceptedBytes = try makeValidOwnerFolder(at: source)
-        let store = OwnerDataStore(
-            containerURL: directory.appendingPathComponent("OwnerData", isDirectory: true),
-            expectedExecutableSHA256: digest(acceptedBytes)
-        )
-        let accepted = try store.importFolder(source)
-
-        let wrongSource = directory.appendingPathComponent("wrong", isDirectory: true)
-        _ = try makeValidOwnerFolder(at: wrongSource, executable: Data("unknown executable".utf8))
-        XCTAssertThrowsError(try store.importFolder(wrongSource)) { error in
-            XCTAssertEqual(error as? OwnerDataError, .executableHashMismatch)
-        }
-        XCTAssertEqual(try store.validateInstalled(), accepted)
-        XCTAssertEqual(try Data(contentsOf: store.installedURL.appendingPathComponent("game.exe")), acceptedBytes)
-    }
-
-    func testRequiredFileInventoryRejectsPartialImport() throws {
-        let directory = try temporaryDirectory()
-        defer { cleanUp(directory) }
-        let partial = directory.appendingPathComponent("partial", isDirectory: true)
+        let partial = directory.appendingPathComponent("Data", isDirectory: true)
         try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
-        try Data("not an owner executable".utf8).write(to: partial.appendingPathComponent("game.exe"))
+        try Data("not the accepted executable".utf8).write(to: partial.appendingPathComponent("game.exe"))
 
         XCTAssertThrowsError(try OwnerDataStore.validate(folder: partial, expectedExecutableSHA256: "unused")) { error in
             XCTAssertEqual(error as? OwnerDataError, .missingFiles(Array(OwnerDataContract.requiredFiles.dropFirst())))
         }
+    }
+
+    func testUnknownFileAndDirectoryAreOutsideTheFinalDeviceAllowlist() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanUp(directory) }
+        let data = directory.appendingPathComponent("Data", isDirectory: true)
+        let bytes = try makeValidOwnerFolder(at: data)
+        let expectedHash = digest(bytes)
+
+        try Data("unexpected".utf8).write(to: data.appendingPathComponent("extra.mix"))
+        XCTAssertThrowsError(try OwnerDataStore.validate(folder: data, expectedExecutableSHA256: expectedHash)) { error in
+            XCTAssertEqual(error as? OwnerDataError, .unsupportedEntry("extra.mix"))
+        }
+
+        try FileManager.default.removeItem(at: data.appendingPathComponent("extra.mix"))
+        try FileManager.default.createDirectory(at: data.appendingPathComponent("nested", isDirectory: true), withIntermediateDirectories: false)
+        XCTAssertThrowsError(try OwnerDataStore.validate(folder: data, expectedExecutableSHA256: expectedHash)) { error in
+            XCTAssertEqual(error as? OwnerDataError, .unsupportedEntry("nested"))
+        }
+    }
+
+    func testWrongExecutableCannotStartFromVisibleData() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanUp(directory) }
+        let data = directory.appendingPathComponent("Data", isDirectory: true)
+        _ = try makeValidOwnerFolder(at: data, executable: Data("unknown executable".utf8))
+
+        XCTAssertThrowsError(try OwnerDataStore.validate(folder: data)) { error in
+            XCTAssertEqual(error as? OwnerDataError, .executableHashMismatch)
+        }
+    }
+
+    func testInfoPlistExposesDocumentsToFiles() throws {
+        let sourceTests = URL(fileURLWithPath: #filePath)
+        let infoPlist = sourceTests
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Info.plist")
+        let data = try Data(contentsOf: infoPlist)
+        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+
+        XCTAssertEqual(plist["UIFileSharingEnabled"] as? Bool, true)
+        XCTAssertEqual(plist["LSSupportsOpeningDocumentsInPlace"] as? Bool, true)
     }
 
     private func makeValidOwnerFolder(at url: URL, executable: Data = Data("asset-free fixture executable".utf8)) throws -> Data {
@@ -74,22 +115,12 @@ final class OwnerDataStoreTests: XCTestCase {
     }
 
     private func temporaryDirectory() throws -> URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("RA2M1Tests", isDirectory: true)
-        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        let directory = support.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
 
     private func cleanUp(_ root: URL) {
-        let fileManager = FileManager.default
-        let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey])
-        while let url = enumerator?.nextObject() as? URL {
-            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            try? fileManager.setAttributes([.posixPermissions: isDirectory ? 0o755 : 0o644], ofItemAtPath: url.path)
-        }
-        try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
-        try? fileManager.removeItem(at: root)
+        try? FileManager.default.removeItem(at: root)
     }
 }

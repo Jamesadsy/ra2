@@ -1,14 +1,13 @@
 import AVFoundation
-import UniformTypeIdentifiers
 import UIKit
 import WebKit
 
 @MainActor
-final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNavigationDelegate {
+final class HostViewController: UIViewController, WKNavigationDelegate {
     private let ownerStore = OwnerDataStore()
     private let statusLabel = UILabel()
     private let detailLabel = UILabel()
-    private let importButton = UIButton(type: .system)
+    private let checkDataButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .large)
     private var webView: WKWebView?
     private var server: LocalAssetServer?
@@ -18,9 +17,9 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.035, green: 0.043, blue: 0.047, alpha: 1)
-        configureImportSurface()
+        configureSetupSurface()
         observeApplicationLifecycle()
-        validateExistingInstall()
+        checkOwnerDataAndStartRuntime()
     }
 
     override var prefersStatusBarHidden: Bool { true }
@@ -32,34 +31,34 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
         server?.stop()
     }
 
-    private func configureImportSurface() {
-        statusLabel.text = "Red Alert 2 — M1 iPhone host"
+    private func configureSetupSurface() {
+        statusLabel.text = "CnC RA2 — M1 iPhone host"
         statusLabel.textColor = .white
         statusLabel.font = .systemFont(ofSize: 22, weight: .semibold)
         statusLabel.textAlignment = .center
         statusLabel.numberOfLines = 0
         statusLabel.accessibilityIdentifier = "ra2-host-status"
 
-        detailLabel.text = "Import your official EA RA2 1.08 data folder. Owner data stays private to this device."
+        detailLabel.text = "Copy the contents of the validated RA2 Data stage in Files to On My iPhone → CnC RA2 → Data. Keep User separate for writable state."
         detailLabel.textColor = UIColor(white: 0.78, alpha: 1)
         detailLabel.font = .systemFont(ofSize: 16)
         detailLabel.textAlignment = .center
         detailLabel.numberOfLines = 0
         detailLabel.accessibilityIdentifier = "ra2-host-detail"
 
-        importButton.setTitle("Import official EA RA2 1.08 data", for: .normal)
-        importButton.setTitleColor(.white, for: .normal)
-        importButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
-        importButton.backgroundColor = UIColor(red: 0.42, green: 0.12, blue: 0.1, alpha: 1)
-        importButton.layer.cornerRadius = 10
-        importButton.contentEdgeInsets = UIEdgeInsets(top: 16, left: 22, bottom: 16, right: 22)
-        importButton.addTarget(self, action: #selector(chooseOwnerFolder), for: .touchUpInside)
-        importButton.accessibilityIdentifier = "ra2-owner-import"
+        checkDataButton.setTitle("Check Data and start", for: .normal)
+        checkDataButton.setTitleColor(.white, for: .normal)
+        checkDataButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        checkDataButton.backgroundColor = UIColor(red: 0.42, green: 0.12, blue: 0.1, alpha: 1)
+        checkDataButton.layer.cornerRadius = 10
+        checkDataButton.contentEdgeInsets = UIEdgeInsets(top: 16, left: 22, bottom: 16, right: 22)
+        checkDataButton.addTarget(self, action: #selector(checkOwnerDataAndStartRuntime), for: .touchUpInside)
+        checkDataButton.accessibilityIdentifier = "ra2-owner-data-check"
 
         spinner.color = .white
         spinner.hidesWhenStopped = true
 
-        let stack = UIStackView(arrangedSubviews: [statusLabel, detailLabel, importButton, spinner])
+        let stack = UIStackView(arrangedSubviews: [statusLabel, detailLabel, checkDataButton, spinner])
         stack.axis = .vertical
         stack.spacing = 22
         stack.alignment = .center
@@ -75,43 +74,23 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
         ])
     }
 
-    private func validateExistingInstall() {
-        setBusy(true, detail: "Checking private owner data…")
+    @objc private func checkOwnerDataAndStartRuntime() {
+        setBusy(true, detail: "Preparing Files-visible Data and User folders…")
         DispatchQueue.global(qos: .userInitiated).async { [ownerStore] in
-            let result = Result { try ownerStore.validateInstalled() }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                switch result {
-                case .success:
-                    self.startRuntime()
-                case .failure:
-                    self.setBusy(false, detail: "Select the extracted ra2 folder prepared from your official EA installation.")
-                }
+            let result = Result {
+                try ownerStore.prepareDocuments()
+                return try ownerStore.validateData()
             }
-        }
-    }
-
-    @objc private func chooseOwnerFolder() {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
-        picker.delegate = self
-        picker.allowsMultipleSelection = false
-        present(picker, animated: true)
-    }
-
-    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let source = urls.first else { return }
-        let hasSecurityScope = source.startAccessingSecurityScopedResource()
-        setBusy(true, detail: "Validating and privately importing EA RA2 1.08…")
-        DispatchQueue.global(qos: .userInitiated).async { [ownerStore] in
-            let result = Result { try ownerStore.importFolder(source) }
-            if hasSecurityScope { source.stopAccessingSecurityScopedResource() }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 switch result {
                 case .success:
                     self.startRuntime()
                 case .failure(let error):
-                    self.setBusy(false, detail: error.localizedDescription)
+                    self.setBusy(
+                        false,
+                        detail: "Place only the validated RA2 M1 Data files in Files → On My iPhone → CnC RA2 → Data. User stays separate. \(error.localizedDescription)"
+                    )
                 }
             }
         }
@@ -119,7 +98,7 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
 
     private func startRuntime() {
         do {
-            try ownerStore.validateInstalled()
+            try ownerStore.validateData()
         } catch {
             setBusy(false, detail: error.localizedDescription)
             return
@@ -130,7 +109,7 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
             return
         }
         let ownerDataToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        let localServer = LocalAssetServer(webRoot: webRoot, ownerRoot: ownerStore.containerURL, ownerDataToken: ownerDataToken)
+        let localServer = LocalAssetServer(webRoot: webRoot, ownerDataRoot: ownerStore.dataURL, ownerDataToken: ownerDataToken)
         server = localServer
         localServer.start { [weak self] outcome in
             DispatchQueue.main.async {
@@ -174,7 +153,7 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
         ])
         statusLabel.isHidden = true
         detailLabel.isHidden = true
-        importButton.isHidden = true
+        checkDataButton.isHidden = true
         browser.load(URLRequest(url: origin))
     }
 
@@ -205,10 +184,10 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
         statusLabel.text = "Route B host stopped"
         detailLabel.isHidden = false
         detailLabel.text = error.localizedDescription
-        importButton.isHidden = false
-        importButton.setTitle("Resume Route B", for: .normal)
-        importButton.removeTarget(self, action: #selector(chooseOwnerFolder), for: .touchUpInside)
-        importButton.addTarget(self, action: #selector(resumeRuntime), for: .touchUpInside)
+        checkDataButton.isHidden = false
+        checkDataButton.setTitle("Resume Route B", for: .normal)
+        checkDataButton.removeTarget(nil, action: nil, for: .touchUpInside)
+        checkDataButton.addTarget(self, action: #selector(resumeRuntime), for: .touchUpInside)
     }
 
     @objc private func resumeRuntime() {
@@ -216,14 +195,14 @@ final class HostViewController: UIViewController, UIDocumentPickerDelegate, WKNa
         webView.reload()
         statusLabel.isHidden = true
         detailLabel.isHidden = true
-        importButton.isHidden = true
+        checkDataButton.isHidden = true
     }
 
     private func setBusy(_ busy: Bool, detail: String) {
         statusLabel.isHidden = false
         detailLabel.isHidden = false
         detailLabel.text = detail
-        importButton.isHidden = busy
+        checkDataButton.isHidden = busy
         busy ? spinner.startAnimating() : spinner.stopAnimating()
     }
 

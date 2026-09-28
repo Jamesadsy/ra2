@@ -1,153 +1,232 @@
 [CmdletBinding()]
 param(
     [string]$Source = 'C:\Program Files\EA Games\Command and Conquer Red Alert II',
-    [string]$Destination = (Join-Path $env:LOCALAPPDATA 'SecondSunPrivate\RA2-M1')
+    [string]$Destination = (Join-Path $env:LOCALAPPDATA 'SecondSunPrivate\RA2-M1\Data'),
+    [ValidateSet('Installation', 'ValidatedStage')]
+    [string]$SourceMode = 'Installation',
+    [string]$ExpectedManifestSHA256 = '',
+    [string]$ManifestPath = (Join-Path (Join-Path $env:LOCALAPPDATA 'SecondSunPrivate\RA2-M1') 'device-data-manifest.json')
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$expectedSha256 = '6FC4B410F8841BA3AD6C57B59FCCAE65F58A8871D86750AF3C1E2D5A7C5AD39D'
-$required = @('game.exe', 'ra2.mix', 'language.mix', 'BINKW32.DLL', 'Blowfish.dll', 'Maps01.mix', 'movies01.mix', 'movies02.mix', 'Multi.mix', 'Theme.mix')
+$expectedExeSha256 = '6FC4B410F8841BA3AD6C57B59FCCAE65F58A8871D86750AF3C1E2D5A7C5AD39D'
+$deviceDataFiles = @(
+    'game.exe',
+    'ra2.mix',
+    'language.mix',
+    'BINKW32.DLL',
+    'Blowfish.dll',
+    'Maps01.mix',
+    'movies01.mix',
+    'movies02.mix',
+    'Multi.mix',
+    'Theme.mix'
+)
 
-function Get-Inventory([string]$Root) {
-    $result = @{}
-    foreach ($file in Get-ChildItem -LiteralPath $Root -File -Recurse -Force) {
-        $relative = [IO.Path]::GetRelativePath($Root, $file.FullName).Replace('\', '/')
-        $result[$relative.ToLowerInvariant()] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+function Get-NormalizedPath([string]$Path) {
+    return [IO.Path]::GetFullPath($Path).TrimEnd('\')
+}
+
+function Test-PathWithin([string]$Path, [string]$Root) {
+    $normalizedPath = Get-NormalizedPath $Path
+    $normalizedRoot = Get-NormalizedPath $Root
+    return $normalizedPath.Equals($normalizedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $normalizedPath.StartsWith($normalizedRoot + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-Inventory([string]$Root, [bool]$RequireExactAllowlist) {
+    $rootValues = Get-Item -LiteralPath $Root -Force
+    if (-not $rootValues.PSIsContainer -or ($rootValues.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Owner-data source/stage root must be a real directory.'
     }
-    return $result
-}
 
-function Assert-RequiredOwnerFiles([string]$Root) {
-    $rootFiles = Get-ChildItem -LiteralPath $Root -File -Force
-    foreach ($name in $required) {
-        $match = $rootFiles | Where-Object { $_.Name -ieq $name } | Select-Object -First 1
-        if ($null -eq $match) { throw "Required RA2 1.08 owner file is missing: $name" }
-        if ($match.Length -le 0) { throw "Required RA2 1.08 owner file is empty: $name" }
+    $entries = @(Get-ChildItem -LiteralPath $Root -Force)
+    if ($RequireExactAllowlist -and ($entries | Where-Object { $_.PSIsContainer }).Count -gt 0) {
+        throw 'Validated Data stage must be flat and contain no subdirectories.'
     }
-    $exe = $rootFiles | Where-Object { $_.Name -ieq 'game.exe' } | Select-Object -First 1
-    $actual = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
-    if ($actual -cne $expectedSha256) { throw "EA RA2 game.exe SHA-256 mismatch: $actual" }
+    if ($RequireExactAllowlist -and $entries.Count -ne $deviceDataFiles.Count) {
+        throw 'Validated Data stage does not contain exactly the approved file count.'
+    }
+
+    $inventory = [Collections.Generic.List[object]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $deviceDataFiles) {
+        $matches = @($entries | Where-Object { -not $_.PSIsContainer -and $_.Name.Equals($name, [StringComparison]::OrdinalIgnoreCase) })
+        if ($matches.Count -ne 1) { throw "Required EA RA2 1.08 owner file is missing or ambiguous: $name" }
+        $file = $matches[0]
+        if (-not $seen.Add($file.Name)) { throw 'Source contains case-insensitive duplicate owner-data names.' }
+        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Required owner-data source contains a reparse point.'
+        }
+        if ($file.Length -le 0) { throw "Required EA RA2 1.08 owner file is empty: $name" }
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $inventory.Add([pscustomobject]@{
+            path   = $file.Name.ToLowerInvariant()
+            bytes  = [int64]$file.Length
+            sha256 = $hash
+        })
+    }
+
+    if ($RequireExactAllowlist) {
+        foreach ($entry in $entries) {
+            if ($entry.PSIsContainer -or -not $seen.Contains($entry.Name)) {
+                throw 'Validated Data stage contains an entry outside the approved allowlist.'
+            }
+        }
+    }
+
+    $exe = $inventory | Where-Object { $_.path -ceq 'game.exe' } | Select-Object -First 1
+    if ($null -eq $exe -or $exe.sha256 -cne $expectedExeSha256.ToLowerInvariant()) {
+        throw 'EA RA2 game.exe SHA-256 does not match the accepted 1.08 executable.'
+    }
+    return @($inventory | Sort-Object -Property path)
 }
 
-$sourcePath = [IO.Path]::GetFullPath($Source).TrimEnd('\')
-$destinationPath = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
-$sourcePrefix = $sourcePath + '\'
-$destinationPrefix = $destinationPath + '\'
-$repositoryPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..')).TrimEnd('\')
-if ($sourcePath.StartsWith('\\')) { throw 'Source must be a local XPS filesystem path, not a network share.' }
-if ($destinationPath.StartsWith('\\')) { throw 'Destination must be a local XPS filesystem path, not a network share.' }
-$sourceDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($sourcePath))
-if ($sourceDrive.DriveType -eq [IO.DriveType]::Network) {
-    throw 'Source must be on a local XPS filesystem, not a mapped network drive.'
-}
-
-if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) { throw "Official EA RA2 1.08 source folder not found: $sourcePath" }
-if ($destinationPath.Equals($repositoryPath, [StringComparison]::OrdinalIgnoreCase) -or
-    $destinationPath.StartsWith($repositoryPath + '\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Destination cannot be inside the source repository.'
-}
-$destinationDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($destinationPath))
-if ($destinationDrive.DriveType -ne [IO.DriveType]::Fixed) {
-    throw 'Destination must be on a fixed local XPS drive.'
-}
-$cloudRoots = @(
-    $env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer,
-    (Join-Path $env:USERPROFILE 'Dropbox'), (Join-Path $env:USERPROFILE 'Google Drive'),
-    (Join-Path $env:USERPROFILE 'iCloudDrive'), (Join-Path $env:USERPROFILE 'iCloud Drive')
-) | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
-if ($cloudRoots | Where-Object {
-    $destinationPath.Equals($_, [StringComparison]::OrdinalIgnoreCase) -or
-    $destinationPath.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase)
-}) {
-    throw 'Destination cannot be inside a configured OneDrive, Dropbox, Google Drive, or iCloud folder.'
-}
-if ($sourcePath.Equals($destinationPath, [StringComparison]::OrdinalIgnoreCase) -or
-    $sourcePath.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-    $destinationPath.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Source and destination must be separate, non-nested directories.'
-}
-
-Assert-RequiredOwnerFiles $sourcePath
-$reparse = Get-ChildItem -LiteralPath $sourcePath -Recurse -Force | Where-Object {
-    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-} | Select-Object -First 1
-if ($null -ne $reparse) { throw 'Source contains a reparse point; refuse to follow it.' }
-
-New-Item -ItemType Directory -Path $destinationPath -Force | Out-Null
-$existingEntries = Get-ChildItem -LiteralPath $destinationPath -Force
-if ($existingEntries) { throw 'Destination must be a new or empty private folder.' }
-$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-$administratorsSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-$access = [System.Security.AccessControl.FileSystemRights]::FullControl
-$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-$acl = Get-Acl -LiteralPath $destinationPath
-$acl.SetAccessRuleProtection($true, $false)
-$acl.SetOwner($currentSid)
-foreach ($sid in @($currentSid, $systemSid, $administratorsSid)) {
-    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-        $sid, $access, $inheritance, [System.Security.AccessControl.PropagationFlags]::None,
-        [System.Security.AccessControl.AccessControlType]::Allow
+function Get-ManifestDigest($Inventory) {
+    $lines = @(
+        foreach ($record in $Inventory) {
+            [string]::Concat(
+                $record.path,
+                [char]9,
+                ([int64]$record.bytes).ToString([Globalization.CultureInfo]::InvariantCulture),
+                [char]9,
+                $record.sha256
+            )
+        }
     )
-    [void]$acl.AddAccessRule($rule)
-}
-Set-Acl -LiteralPath $destinationPath -AclObject $acl
-$finalFolder = Join-Path $destinationPath 'ra2'
-$zipPath = Join-Path $destinationPath 'RA2-OwnerData-1.08.zip'
-if (Test-Path -LiteralPath $finalFolder) { throw 'Destination already has a ra2 folder; select a new empty destination to prevent overwrite.' }
-if (Test-Path -LiteralPath $zipPath) { throw 'Destination already has the owner-data ZIP; select a new destination to prevent overwrite.' }
-
-$staging = Join-Path $destinationPath ('.ra2-staging-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $staging -Force:$false | Out-Null
-try {
-    & robocopy $sourcePath $staging /E /COPY:DAT /DCOPY:DAT /R:0 /W:0 /XJ /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -gt 7) { throw "Owner-data copy failed with robocopy exit code $LASTEXITCODE." }
-
-    Assert-RequiredOwnerFiles $staging
-    $sourceInventory = Get-Inventory $sourcePath
-    $stagedInventory = Get-Inventory $staging
-    if ($sourceInventory.Count -ne $stagedInventory.Count) { throw 'Copied owner-data inventory count differs from the EA source.' }
-    foreach ($path in $sourceInventory.Keys) {
-        if (-not $stagedInventory.ContainsKey($path) -or $sourceInventory[$path] -cne $stagedInventory[$path]) {
-            throw 'Copied owner-data SHA-256 inventory differs from the EA source.'
-        }
-    }
-
-    Move-Item -LiteralPath $staging -Destination $finalFolder
-    Add-Type -AssemblyName System.IO.Compression
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    $body = [string]::Join([char]10, [string[]]$lines) + [string][char]10
+    $encoding = [Text.UTF8Encoding]::new($false)
+    $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        foreach ($file in Get-ChildItem -LiteralPath $finalFolder -File -Recurse -Force) {
-            $relative = [IO.Path]::GetRelativePath($finalFolder, $file.FullName).Replace('\', '/')
-            $entry = $archive.CreateEntry("ra2/$relative", [System.IO.Compression.CompressionLevel]::NoCompression)
-            $input = [IO.File]::OpenRead($file.FullName)
-            try {
-                $output = $entry.Open()
-                try { $input.CopyTo($output) } finally { $output.Dispose() }
-            } finally { $input.Dispose() }
-        }
+        return [Convert]::ToHexString($sha.ComputeHash($encoding.GetBytes($body))).ToLowerInvariant()
     } finally {
-        $archive.Dispose()
+        $sha.Dispose()
+    }
+}
+
+$sourcePath = Get-NormalizedPath $Source
+$destinationPath = Get-NormalizedPath $Destination
+$manifestPathFull = [IO.Path]::GetFullPath($ManifestPath)
+$repositoryPath = Get-NormalizedPath (Join-Path $PSScriptRoot '../..')
+$canonicalGData = 'G:\My Drive\data-master-ra2\Data'
+
+if ($sourcePath.StartsWith('\\')) { throw 'Source must be a local XPS filesystem path.' }
+if ($destinationPath.StartsWith('\\')) { throw 'Destination must be a mounted XPS filesystem path, not a UNC path.' }
+if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) { throw 'Selected private owner-data source directory was not found.' }
+if ((Test-PathWithin $destinationPath $repositoryPath) -or (Test-PathWithin $manifestPathFull $repositoryPath)) {
+    throw 'Private owner data and manifests must remain outside the source repository.'
+}
+if ((Test-PathWithin $destinationPath $sourcePath) -or (Test-PathWithin $sourcePath $destinationPath)) {
+    throw 'Source and Data destination must be separate, non-nested directories.'
+}
+if ((Test-PathWithin $manifestPathFull $destinationPath) -or $manifestPathFull.Equals($destinationPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The complete local manifest must remain outside the device Data folder.'
+}
+
+$cloudRoots = @(
+    $env:OneDrive,
+    $env:OneDriveCommercial,
+    $env:OneDriveConsumer,
+    (Join-Path $env:USERPROFILE 'Dropbox'),
+    (Join-Path $env:USERPROFILE 'Google Drive'),
+    (Join-Path $env:USERPROFILE 'iCloudDrive'),
+    (Join-Path $env:USERPROFILE 'iCloud Drive')
+) | Where-Object { $_ } | ForEach-Object { Get-NormalizedPath $_ }
+foreach ($cloudRoot in $cloudRoots) {
+    if ((Test-PathWithin $destinationPath $cloudRoot) -and
+        -not $destinationPath.Equals($canonicalGData, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Destination must be a local private stage, except for the explicitly authorized mounted G: transfer surface.'
+    }
+    if (Test-PathWithin $manifestPathFull $cloudRoot) {
+        throw 'The full owner-data manifest must not be written to a cloud-synced folder.'
+    }
+}
+
+$destinationDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($destinationPath))
+if ($destinationDrive.DriveType -eq [IO.DriveType]::Network -and
+    -not $destinationPath.Equals($canonicalGData, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Destination must be on the local XPS filesystem or the explicitly authorized mounted G: transfer surface.'
+}
+if ($SourceMode -eq 'Installation' -and
+    -not $sourcePath.Equals('C:\Program Files\EA Games\Command and Conquer Red Alert II', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Installation mode accepts only the Chairman-owned official EA RA2 installation path.'
+}
+if ($SourceMode -eq 'ValidatedStage' -and $ExpectedManifestSHA256 -notmatch '(?i)^[0-9a-f]{64}$') {
+    throw 'ValidatedStage mode requires the manifest SHA-256 proven by the private regression.'
+}
+if (Test-Path -LiteralPath $destinationPath) { throw 'Destination Data folder already exists; refusing to merge or overwrite it.' }
+if (Test-Path -LiteralPath $manifestPathFull) { throw 'Manifest output already exists; choose a fresh private evidence path.' }
+
+$sourceInventory = @(Get-Inventory $sourcePath ($SourceMode -eq 'ValidatedStage'))
+$sourceManifestDigest = Get-ManifestDigest $sourceInventory
+if ($SourceMode -eq 'ValidatedStage' -and
+    $sourceManifestDigest -cne $ExpectedManifestSHA256.ToLowerInvariant()) {
+    throw 'Validated Data stage manifest does not match the private regression result.'
+}
+
+$destinationParent = Split-Path -Parent $destinationPath
+if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+    New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+}
+$staging = Join-Path $destinationParent ('.RA2-Data-stage-' + [Guid]::NewGuid().ToString('N'))
+$manifestParent = Split-Path -Parent $manifestPathFull
+if (-not (Test-Path -LiteralPath $manifestParent -PathType Container)) {
+    New-Item -ItemType Directory -Path $manifestParent -Force | Out-Null
+}
+$manifestTemp = Join-Path $manifestParent ('.RA2-Data-manifest-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+$promoted = $false
+$manifestPromoted = $false
+
+try {
+    New-Item -ItemType Directory -Path $staging -Force:$false | Out-Null
+    foreach ($name in $deviceDataFiles) {
+        $file = Get-ChildItem -LiteralPath $sourcePath -File -Force |
+            Where-Object { $_.Name.Equals($name, [StringComparison]::OrdinalIgnoreCase) } |
+            Select-Object -First 1
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $staging $file.Name)
     }
 
-    $finalExe = Get-ChildItem -LiteralPath $finalFolder -File | Where-Object { $_.Name -ieq 'game.exe' } | Select-Object -First 1
-    $finalHash = (Get-FileHash -LiteralPath $finalExe.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
-    if ($finalHash -cne $expectedSha256) { throw 'Final owner-data executable identity verification failed.' }
-    Write-Host "RA2_OWNER_DATA_STAGED=$finalFolder"
-    Write-Host "RA2_OWNER_DATA_ZIP=$zipPath"
-    Write-Host "EA108_GAME_EXE_SHA256=$finalHash"
-    Write-Host 'SOURCE_COPY_HASH_INVENTORY=verified'
-    Write-Host 'ZIP_COMPRESSION=none'
+    $stagedInventory = @(Get-Inventory $staging $true)
+    $stagedManifestDigest = Get-ManifestDigest $stagedInventory
+    if ($stagedManifestDigest -cne $sourceManifestDigest) {
+        throw 'Staged Data count, bytes or SHA-256 inventory differs from the validated source.'
+    }
+
+    $totalBytes = [int64](($stagedInventory | Measure-Object -Property bytes -Sum).Sum)
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        purpose = 'RA2 M1 private device Data custody manifest'
+        fileCount = $stagedInventory.Count
+        totalBytes = $totalBytes
+        manifestSHA256 = $stagedManifestDigest
+        gameExeSHA256 = $expectedExeSha256
+        files = @($stagedInventory)
+    }
+    $manifestJson = ConvertTo-Json -InputObject $manifest -Depth 5
+    [IO.File]::WriteAllText($manifestTemp, $manifestJson + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $manifestTemp -Destination $manifestPathFull
+    $manifestPromoted = $true
+    Move-Item -LiteralPath $staging -Destination $destinationPath
+    $promoted = $true
+
+    Write-Host 'RA2_DEVICE_DATA_STAGE=verified'
+    Write-Host "RA2_DEVICE_DATA_MODE=$SourceMode"
+    Write-Host "RA2_DEVICE_DATA_FILE_COUNT=$($stagedInventory.Count)"
+    Write-Host "RA2_DEVICE_DATA_TOTAL_BYTES=$totalBytes"
+    Write-Host "RA2_DEVICE_DATA_MANIFEST_SHA256=$stagedManifestDigest"
+    Write-Host "EA108_GAME_EXE_SHA256=$expectedExeSha256"
 } catch {
-    if (Test-Path -LiteralPath $staging -PathType Container) {
-        # The exact GUID staging path was created by this invocation and is inside the verified destination.
-        $resolvedStage = [IO.Path]::GetFullPath($staging)
-        if ($resolvedStage.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $promoted -and (Test-Path -LiteralPath $staging -PathType Container)) {
+        $resolvedStage = Get-NormalizedPath $staging
+        $resolvedParent = Get-NormalizedPath $destinationParent
+        if ($resolvedStage.StartsWith($resolvedParent + '\', [StringComparison]::OrdinalIgnoreCase)) {
             Remove-Item -LiteralPath $resolvedStage -Recurse -Force
         }
     }
-    if (Test-Path -LiteralPath $zipPath -PathType Leaf) { Remove-Item -LiteralPath $zipPath -Force }
+    if (-not $promoted -and $manifestPromoted -and (Test-Path -LiteralPath $manifestPathFull -PathType Leaf)) {
+        Remove-Item -LiteralPath $manifestPathFull -Force
+    }
+    if (Test-Path -LiteralPath $manifestTemp -PathType Leaf) { Remove-Item -LiteralPath $manifestTemp -Force }
     throw
 }
