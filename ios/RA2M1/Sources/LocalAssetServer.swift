@@ -374,8 +374,16 @@ private final class FileStreamer {
             }
             remaining -= UInt64(data.count)
             offset += UInt64(data.count)
-            connection.send(content: data, completion: .contentProcessed { [weak self] error in
-                guard let self, error == nil else { self?.connection.cancel(); return }
+            // Keep the streamer alive until the entire response has drained.
+            // A weak-only completion lets this temporary FileStreamer deallocate
+            // after start(), leaving large bundles open after the first 256 KiB.
+            connection.send(content: data, completion: .contentProcessed { error in
+                guard error == nil else {
+                    try? self.handle?.close()
+                    self.handle = nil
+                    self.connection.cancel()
+                    return
+                }
                 self.queue.async { self.sendNext() }
             })
         } catch {
