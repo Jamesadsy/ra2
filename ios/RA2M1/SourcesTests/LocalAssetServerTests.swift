@@ -23,6 +23,50 @@ final class LocalAssetServerTests: XCTestCase {
         XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2", webRoot: web, ownerDataRoot: data), .directory(data))
     }
 
+    func testOwnerFilenameResolverUsesActualCasingWithoutFilesystemAssumptions() {
+        let physicalNames = ["MAPS01.MIX", "MOVIES01.MIX", "unaccepted.mix"]
+        XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "maps01.mix", actualNames: physicalNames), "MAPS01.MIX")
+        XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "Maps01.mix", actualNames: physicalNames), "MAPS01.MIX")
+        XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "movies01.mix", actualNames: physicalNames), "MOVIES01.MIX")
+        XCTAssertNil(LocalAssetServer.resolveOwnerFileName(requestedName: "unaccepted.mix", actualNames: physicalNames))
+        XCTAssertNil(LocalAssetServer.resolveOwnerFileName(requestedName: "maps01.mix", actualNames: ["Maps01.mix", "MAPS01.MIX"]))
+    }
+
+    func testRootAndScopedOwnerRoutesResolveDivergentPhysicalCase() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let data = root.appendingPathComponent("Data", isDirectory: true)
+        try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
+        let fixtures: [(physicalName: String, bytes: Data, requests: [String])] = [
+            ("MAPS01.MIX", Data("maps-fixture".utf8), ["/game/maps01.mix", "/game/Maps01.mix", "/game/ra2/maps01.mix"]),
+            ("MOVIES01.MIX", Data("movies-fixture".utf8), ["/game/movies01.mix", "/game/ra2/movies01.mix"]),
+        ]
+        for fixture in fixtures {
+            try fixture.bytes.write(to: data.appendingPathComponent(fixture.physicalName))
+        }
+
+        for fixture in fixtures {
+            let expectedURL = data.appendingPathComponent(fixture.physicalName)
+            for target in fixture.requests {
+                guard case let .file(url, ownerData) = LocalAssetServer.resolve(
+                    target: target,
+                    webRoot: root,
+                    ownerDataRoot: data
+                ) else {
+                    XCTFail("Expected an owner file route for \(target)")
+                    continue
+                }
+                XCTAssertTrue(ownerData, target)
+                XCTAssertEqual(url.lastPathComponent, fixture.physicalName, target)
+                XCTAssertEqual(url, expectedURL, target)
+                XCTAssertEqual(try Data(contentsOf: url), fixture.bytes, target)
+            }
+        }
+
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/maps02.mix", webRoot: root, ownerDataRoot: data), .badRequest)
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/maps02.mix", webRoot: root, ownerDataRoot: data), .badRequest)
+    }
+
     func testEncodedAndPlainTraversalAreRejected() {
         let root = FileManager.default.temporaryDirectory
         for target in ["/game/../secret", "/game/%2e%2e/secret", "/%2e%2e/private", "/game/ra2/%5c..%5csecret"] {
@@ -65,6 +109,8 @@ final class LocalAssetServerTests: XCTestCase {
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/assets/index-DfPGVsaw.js?cache=1"), "public/assets/index-dfpgvsaw.js")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/.list?dir=ra2&token=private"), "owner/.list")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/game.exe?token=private"), "owner/game.exe")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/maps01.mix?token=private"), "owner/maps01.mix")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/ra2/maps01.mix?token=private"), "owner/maps01.mix")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/ra2/game.exe?token=private"), "owner/game.exe")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/User/LastLaunchDiagnostics.txt"), "owner/other")
     }

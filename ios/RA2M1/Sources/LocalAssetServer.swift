@@ -84,21 +84,40 @@ final class LocalAssetServer {
                 guard directory.isEmpty || directory.caseInsensitiveCompare("ra2") == .orderedSame else { return .badRequest }
                 return .directory(ownerDataRoot)
             }
-            if parts.count == 2, let canonicalName = OwnerDataContract.requiredFiles.first(where: {
+            if parts.count == 2, OwnerDataContract.requiredFiles.contains(where: {
                 $0.caseInsensitiveCompare(parts[1]) == .orderedSame
             }) {
-                return .file(ownerDataRoot.appendingPathComponent(canonicalName), ownerData: true)
+                return ownerFileRoute(requestedName: parts[1], ownerDataRoot: ownerDataRoot)
             }
             guard parts.count >= 2, parts[1].caseInsensitiveCompare("ra2") == .orderedSame else { return .badRequest }
             if parts.count == 2 { return .directory(ownerDataRoot) }
-            let dataPath = Array(parts.dropFirst(2))
-            guard safeComponents(dataPath) else { return .badRequest }
-            return .file(append(dataPath, to: ownerDataRoot), ownerData: true)
+            guard parts.count == 3 else { return .badRequest }
+            return ownerFileRoute(requestedName: parts[2], ownerDataRoot: ownerDataRoot)
         }
 
         let publicParts = parts.isEmpty ? ["index.html"] : parts
         guard safeComponents(publicParts) else { return .badRequest }
         return .file(append(publicParts, to: webRoot), ownerData: false)
+    }
+
+    static func resolveOwnerFileName(requestedName: String, actualNames: [String]) -> String? {
+        guard let contractName = OwnerDataContract.requiredFiles.first(where: {
+            $0.caseInsensitiveCompare(requestedName) == .orderedSame
+        }) else { return nil }
+        let matches = actualNames.filter { $0.caseInsensitiveCompare(contractName) == .orderedSame }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    private static func ownerFileRoute(requestedName: String, ownerDataRoot: URL) -> LocalAssetRoute {
+        guard OwnerDataContract.requiredFiles.contains(where: {
+            $0.caseInsensitiveCompare(requestedName) == .orderedSame
+        }) else { return .badRequest }
+        guard let actualNames = try? FileManager.default.contentsOfDirectory(atPath: ownerDataRoot.path),
+              let actualName = resolveOwnerFileName(requestedName: requestedName, actualNames: actualNames) else {
+            return .notFound
+        }
+        return .file(ownerDataRoot.appendingPathComponent(actualName), ownerData: true)
     }
 
     static func parseRange(_ header: String?, fileSize: UInt64) -> Result<Range<UInt64>?, RangeError> {

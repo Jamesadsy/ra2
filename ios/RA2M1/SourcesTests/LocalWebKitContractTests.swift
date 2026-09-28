@@ -173,7 +173,13 @@ final class LocalWebKitContractTests: XCTestCase {
         let ownerDataRoot = root.appendingPathComponent("Data", isDirectory: true)
         try FileManager.default.createDirectory(at: ownerDataRoot, withIntermediateDirectories: true)
         for name in OwnerDataContract.requiredFiles {
-            try Data([0x01, 0x02]).write(to: ownerDataRoot.appendingPathComponent(name))
+            let physicalName: String
+            switch name.lowercased() {
+            case "maps01.mix": physicalName = "MAPS01.MIX"
+            case "movies01.mix": physicalName = "MOVIES01.MIX"
+            default: physicalName = name
+            }
+            try Data([0x01, 0x02]).write(to: ownerDataRoot.appendingPathComponent(physicalName))
         }
         let token = "063-route-b-test-capability"
         let server = LocalAssetServer(webRoot: webRoot, ownerDataRoot: ownerDataRoot, port: LocalAssetServer.productionPort + 3, ownerDataToken: token)
@@ -246,6 +252,31 @@ final class LocalWebKitContractTests: XCTestCase {
 
         let (_, unauthorizedVMResponse) = try await URLSession.shared.data(from: vmExecutableURL)
         XCTAssertEqual((unauthorizedVMResponse as? HTTPURLResponse)?.statusCode, 404)
+
+        let divergentCaseRequests = [
+            "/game/maps01.mix",
+            "/game/Maps01.mix",
+            "/game/ra2/maps01.mix",
+            "/game/movies01.mix",
+            "/game/ra2/movies01.mix",
+        ]
+        for path in divergentCaseRequests {
+            let url = try XCTUnwrap(URL(string: path, relativeTo: server.origin)?.absoluteURL)
+            var request = URLRequest(url: url)
+            request.setValue(token, forHTTPHeaderField: "X-RA2-Owner-Token")
+            let (bytes, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, path)
+            XCTAssertEqual(bytes, Data([0x01, 0x02]), path)
+        }
+
+        let mapsURL = try XCTUnwrap(URL(string: "/game/maps01.mix", relativeTo: server.origin)?.absoluteURL)
+        let (_, unauthorizedMapsResponse) = try await URLSession.shared.data(from: mapsURL)
+        XCTAssertEqual((unauthorizedMapsResponse as? HTTPURLResponse)?.statusCode, 404)
+
+        let (_, unknownScopedResponse) = try await URLSession.shared.data(
+            from: try XCTUnwrap(URL(string: "/game/ra2/maps02.mix", relativeTo: server.origin)?.absoluteURL)
+        )
+        XCTAssertEqual((unknownScopedResponse as? HTTPURLResponse)?.statusCode, 400)
     }
 
     private func waitForString(_ expression: String, in webView: WKWebView) async throws -> String? {
