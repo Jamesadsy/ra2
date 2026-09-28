@@ -35,7 +35,7 @@ final class OwnerDataStoreTests: XCTestCase {
             expectedExecutableSHA256: digest(Data("fixture executable".utf8))
         )
         try store.prepareDocuments()
-        let fixtureBytes = try makeValidOwnerFolder(at: store.dataURL)
+        let fixtureBytes = try makeValidOwnerFolder(at: store.dataURL, executable: Data("fixture executable".utf8))
 
         let validated = try store.validateData()
 
