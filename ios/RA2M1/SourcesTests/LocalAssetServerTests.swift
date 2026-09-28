@@ -53,4 +53,20 @@ final class LocalAssetServerTests: XCTestCase {
         XCTAssertFalse(LocalAssetServer.authorizesOwnerRequest(expectedToken: "a1b2c3d4", suppliedToken: "wrong"))
         XCTAssertFalse(LocalAssetServer.authorizesOwnerRequest(expectedToken: "", suppliedToken: ""))
     }
+
+    func testDiagnosticsMapSameOriginRouteBRequestsWithoutLoggingQueryTokens() {
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/"), "public/index.html")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/assets/index-DfPGVsaw.js?cache=1"), "public/assets/index-dfpgvsaw.js")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/.list?dir=ra2&token=private"), "owner/.list")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/ra2/game.exe?token=private"), "owner/game.exe")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/User/LastLaunchDiagnostics.txt"), "owner/other")
+    }
+
+    func testPackagedWebRuntimeUsesRouteBJavaScriptCssAndWasmMimeTypes() {
+        XCTAssertEqual(LocalAssetServer.mimeType(for: URL(fileURLWithPath: "/Web/index.html")), "text/html; charset=utf-8")
+        XCTAssertEqual(LocalAssetServer.mimeType(for: URL(fileURLWithPath: "/Web/assets/index.js")), "text/javascript; charset=utf-8")
+        XCTAssertEqual(LocalAssetServer.mimeType(for: URL(fileURLWithPath: "/Web/assets/index.css")), "text/css; charset=utf-8")
+        XCTAssertEqual(LocalAssetServer.mimeType(for: URL(fileURLWithPath: "/Web/assets/v86.wasm")), "application/wasm")
+        XCTAssertEqual(LocalAssetServer.mimeType(for: URL(fileURLWithPath: "/Web/assets/vmWorker.js")), "text/javascript; charset=utf-8")
+    }
 }

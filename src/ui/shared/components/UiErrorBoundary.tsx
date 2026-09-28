@@ -1,10 +1,14 @@
 import { t, localizeText } from '../i18n/translate';
 import { Component, type ReactNode } from 'react';
+import { reportNativeRuntimeError } from '../../../platform/browser/nativeDiagnostics';
 
 export class UiErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
   static getDerivedStateFromError(error: unknown) {
     return { error: error instanceof Error ? error.message : String(error) };
+  }
+  componentDidCatch(error: Error) {
+    reportNativeRuntimeError('bootstrap', error);
   }
   render() {
     if (!this.state.error) return this.props.children;

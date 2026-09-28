@@ -1,4 +1,5 @@
 import { syntheticKeyStroke, type KeyStrokeTarget } from './input';
+import { reportNativeTouch } from '../../../platform/browser/nativeDiagnostics';
 
 /**
  * Touch virtual-key toolbar: Esc/Enter/Space/arrows plus collapse toggle.
@@ -12,6 +13,7 @@ const STORAGE_KEY = 'ra2-vm-touch-controls-hidden';
 export function installAdaptiveTouchControls(canvas: HTMLElement, vm: KeyStrokeTarget): () => void {
   let cleanupTouch: (() => void) | undefined;
   const hide = () => {
+    if (cleanupTouch) reportNativeTouch({ event: 'mode', mode: 'controlsHidden' });
     cleanupTouch?.();
     cleanupTouch = undefined;
   };
@@ -36,6 +38,7 @@ export function installTouchControls(vm: KeyStrokeTarget): () => void {
   const container = document.getElementById('vm-touch-controls') as HTMLElement | null;
   if (!container) return () => {};
   container.hidden = false;
+  reportNativeTouch({ event: 'mode', mode: 'controlsShown' });
 
   const keys = [...container.querySelectorAll<HTMLButtonElement>('[data-code]')];
   const collapse = container.querySelector<HTMLButtonElement>('[data-role="collapse"]');
@@ -67,6 +70,7 @@ export function installTouchControls(vm: KeyStrokeTarget): () => void {
 
   const setCollapsed = (collapsed: boolean) => {
     container.classList.toggle('collapsed', collapsed);
+    reportNativeTouch({ event: 'mode', mode: collapsed ? 'controlsCollapsed' : 'controlsExpanded' });
     try {
       localStorage.setItem(STORAGE_KEY, collapsed ? '1' : '');
     } catch {
@@ -169,6 +173,7 @@ export function installTouchControls(vm: KeyStrokeTarget): () => void {
       if (codes.length) startHeld(codes);
     };
     const resetJoystick = () => {
+      if (joystickPointer !== -1) reportNativeTouch({ event: 'gesture', gesture: 'released' });
       joystickPointer = -1;
       stopHeld();
       knob.style.transform = 'translate(0px, 0px)';
@@ -177,6 +182,12 @@ export function installTouchControls(vm: KeyStrokeTarget): () => void {
     on(joystick, 'pointerdown', (event) => {
       event.preventDefault();
       joystickPointer = event.pointerId;
+      reportNativeTouch({
+        event: 'gesture',
+        gesture: 'joystick',
+        pointerType: event.pointerType,
+        pointerId: event.pointerId,
+      });
       try {
         joystick.setPointerCapture(event.pointerId);
       } catch {
@@ -194,6 +205,14 @@ export function installTouchControls(vm: KeyStrokeTarget): () => void {
         dy = (dy * RADIUS) / distance;
       }
       knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      reportNativeTouch({
+        event: 'gesture',
+        gesture: 'joystick',
+        pointerType: event.pointerType,
+        pointerId: event.pointerId,
+        translationX: dx,
+        translationY: dy,
+      });
       applyDirection(directionFor(dx, dy));
       event.preventDefault();
     };
@@ -218,6 +237,7 @@ export function installTouchControls(vm: KeyStrokeTarget): () => void {
     releaseAll();
     removers.splice(0).forEach((remove) => remove());
     container.hidden = true;
+    reportNativeTouch({ event: 'mode', mode: 'controlsHidden' });
     if (joystick) joystick.hidden = true;
   };
 }

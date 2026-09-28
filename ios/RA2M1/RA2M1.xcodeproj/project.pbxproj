@@ -16,6 +16,8 @@
 		A10000000000000000000009 /* LocalAssetServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* LocalAssetServerTests.swift */; };
 		A1000000000000000000000A /* RuntimeLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* RuntimeLifecycleTests.swift */; };
 		A1000000000000000000000B /* LocalWebKitContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* LocalWebKitContractTests.swift */; };
+		A1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Assets.xcassets */; };
+		A1000000000000000000000D /* RuntimeDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* RuntimeDiagnostics.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -42,6 +44,8 @@
 		A2000000000000000000000B /* LocalWebKitContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalWebKitContractTests.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* RA2M1.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RA2M1.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000000D /* RA2M1Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RA2M1Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000E /* RuntimeDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeDiagnostics.swift; sourceTree = "<group>"; };
+		A2000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Resources/Assets.xcassets; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -50,8 +54,8 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002 /* Sources */, A40000000000000000000003 /* Tests */, A20000000000000000000006 /* Info.plist */, A20000000000000000000007 /* Web */, A40000000000000000000004 /* Products */); sourceTree = "<group>"; };
-		A40000000000000000000002 /* Sources */ = {isa = PBXGroup; children = (A20000000000000000000001 /* AppDelegate.swift */, A20000000000000000000002 /* OwnerDataStore.swift */, A20000000000000000000003 /* LocalAssetServer.swift */, A20000000000000000000004 /* HostViewController.swift */, A20000000000000000000005 /* RuntimeLifecycle.swift */); path = Sources; sourceTree = "<group>"; };
+		A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002 /* Sources */, A40000000000000000000003 /* Tests */, A20000000000000000000006 /* Info.plist */, A20000000000000000000007 /* Web */, A2000000000000000000000F /* Assets.xcassets */, A40000000000000000000004 /* Products */); sourceTree = "<group>"; };
+		A40000000000000000000002 /* Sources */ = {isa = PBXGroup; children = (A20000000000000000000001 /* AppDelegate.swift */, A20000000000000000000002 /* OwnerDataStore.swift */, A20000000000000000000003 /* LocalAssetServer.swift */, A20000000000000000000004 /* HostViewController.swift */, A20000000000000000000005 /* RuntimeLifecycle.swift */, A2000000000000000000000E /* RuntimeDiagnostics.swift */); path = Sources; sourceTree = "<group>"; };
 		A40000000000000000000003 /* Tests */ = {isa = PBXGroup; children = (A20000000000000000000008 /* OwnerDataStoreTests.swift */, A20000000000000000000009 /* LocalAssetServerTests.swift */, A2000000000000000000000A /* RuntimeLifecycleTests.swift */, A2000000000000000000000B /* LocalWebKitContractTests.swift */); path = SourcesTests; sourceTree = "<group>"; };
 		A40000000000000000000004 /* Products */ = {isa = PBXGroup; name = Products; children = (A2000000000000000000000C /* RA2M1.app */, A2000000000000000000000D /* RA2M1Tests.xctest */); sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -66,12 +70,12 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A30000000000000000000004 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006 /* Web in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000004 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006 /* Web in Resources */, A1000000000000000000000C /* Assets.xcassets in Resources */); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000006 /* Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A30000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* AppDelegate.swift in Sources */, A10000000000000000000002 /* OwnerDataStore.swift in Sources */, A10000000000000000000003 /* LocalAssetServer.swift in Sources */, A10000000000000000000004 /* HostViewController.swift in Sources */, A10000000000000000000005 /* RuntimeLifecycle.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* AppDelegate.swift in Sources */, A10000000000000000000002 /* OwnerDataStore.swift in Sources */, A10000000000000000000003 /* LocalAssetServer.swift in Sources */, A10000000000000000000004 /* HostViewController.swift in Sources */, A10000000000000000000005 /* RuntimeLifecycle.swift in Sources */, A1000000000000000000000D /* RuntimeDiagnostics.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000005 /* Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000008 /* OwnerDataStoreTests.swift in Sources */, A10000000000000000000009 /* LocalAssetServerTests.swift in Sources */, A1000000000000000000000A /* RuntimeLifecycleTests.swift in Sources */, A1000000000000000000000B /* LocalWebKitContractTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
@@ -82,8 +86,8 @@
 /* Begin XCBuildConfiguration section */
 		AB0000000000000000000001 /* Debug Project */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Debug; };
 		AB0000000000000000000002 /* Release Project */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Release; };
-		AB0000000000000000000003 /* Debug App */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = org.second-sun.ra2m1; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Debug; };
-		AB0000000000000000000004 /* Release App */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = org.second-sun.ra2m1; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
+		AB0000000000000000000003 /* Debug App */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = org.second-sun.ra2m1; PRODUCT_NAME = "$(TARGET_NAME)"; RA2_SOURCE_BRANCH = local; RA2_SOURCE_COMMIT = local; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Debug; };
+		AB0000000000000000000004 /* Release App */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = org.second-sun.ra2m1; PRODUCT_NAME = "$(TARGET_NAME)"; RA2_SOURCE_BRANCH = local; RA2_SOURCE_COMMIT = local; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
 		AB0000000000000000000005 /* Debug Tests */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = org.second-sun.ra2m1.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RA2M1.app/RA2M1"; }; name = Debug; };
 		AB0000000000000000000006 /* Release Tests */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = org.second-sun.ra2m1.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RA2M1.app/RA2M1"; }; name = Release; };
 /* End XCBuildConfiguration section */

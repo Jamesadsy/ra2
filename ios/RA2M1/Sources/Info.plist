@@ -6,6 +6,8 @@
 	<string>CnC RA2</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
@@ -18,6 +20,10 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>RA2SourceBranch</key>
+	<string>$(RA2_SOURCE_BRANCH)</string>
+	<key>RA2SourceCommit</key>
+	<string>$(RA2_SOURCE_COMMIT)</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

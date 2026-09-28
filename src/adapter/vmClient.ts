@@ -13,6 +13,11 @@ import {
 import type { VmAttachResult, VmPointerState, VmShell } from './vmShell';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
+import {
+  reportNativeRuntimeError,
+  reportNativeRuntimeEvent,
+  reportNativeRuntimePhase,
+} from '../platform/browser/nativeDiagnostics';
 
 const PROBE_TIMEOUT_MS = 3000;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -91,7 +96,10 @@ export class WorkerVmClient implements VmShell {
     this.audio =
       options.audio ??
       new WebAudioPcmSink({
-        onError: (error) => console.warn('[VM audio]', error),
+        onError: (error) => {
+          console.warn('[VM audio]', error);
+          reportNativeRuntimeError('audio', error);
+        },
         diagnosticsIntervalMs: AUDIO_DIAGNOSTICS_INTERVAL_MS,
       });
     if (typeof window !== 'undefined' && new URLSearchParams(window.location?.search ?? '').get('debug') === '1') {
@@ -140,6 +148,7 @@ export class WorkerVmClient implements VmShell {
     this.removePagehideFlush = () => window.removeEventListener('pagehide', flushOnPagehide);
     try {
       await this.probeReady;
+      reportNativeRuntimePhase('vmStartupEntered');
       await this.request<void>(
         (requestId) => ({ type: 'init', config: this.initConfig, requestId }),
         this.initTransfer,
@@ -312,6 +321,10 @@ export class WorkerVmClient implements VmShell {
         break;
       }
       case 'status':
+        reportNativeRuntimeEvent('vm status: ' + message.phase);
+        if (message.phase === 'error' || message.phase === 'blocked') {
+          reportNativeRuntimeError('fatalVM', message.detail);
+        }
         this.callbacks.onStatus?.({ phase: message.phase, detail: message.detail });
         break;
       case 'shell-page':
@@ -413,6 +426,7 @@ export class WorkerVmClient implements VmShell {
     const destroying = this.lifecycle === 'destroying';
     const wasProbed = this.probeOk;
     this.fatalReason = reason;
+    reportNativeRuntimeError('fatalVM', reason);
     this.lifecycle = 'fatal';
     if (this.probeTimer !== null) globalThis.clearTimeout(this.probeTimer);
     this.probeTimer = null;

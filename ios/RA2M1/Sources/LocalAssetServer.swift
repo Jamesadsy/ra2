@@ -19,6 +19,7 @@ final class LocalAssetServer {
     private let ownerDataToken: String
     private let queue = DispatchQueue(label: "org.second-sun.ra2m1.loopback")
     private var listener: NWListener?
+    var onDiagnosticResponse: ((String, Int) -> Void)?
 
     init(webRoot: URL, ownerDataRoot: URL, port: UInt16 = productionPort, ownerDataToken: String = "") {
         self.webRoot = webRoot
@@ -118,6 +119,27 @@ final class LocalAssetServer {
         return zip(expectedToken.utf8, suppliedToken.utf8).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
     }
 
+    static func diagnosticRoute(target: String) -> String {
+        guard let components = URLComponents(string: "http://127.0.0.1\(target)"),
+              let path = components.percentEncodedPath.removingPercentEncoding else { return "" }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true).map { $0.lowercased() }
+        if parts.isEmpty || parts == ["index.html"] { return "public/index.html" }
+        if parts.first == "game" {
+            if parts.count == 2, parts[1] == ".list" { return "owner/.list" }
+            if parts.count == 3, parts[1] == "ra2" {
+                let allowed = Set(["game.exe", "ra2.mix", "language.mix", "binkw32.dll", "blowfish.dll",
+                                   "maps01.mix", "movies01.mix", "movies02.mix", "multi.mix", "theme.mix"])
+                return allowed.contains(parts[2]) ? "owner/\(parts[2])" : "owner/other"
+            }
+            return "owner/other"
+        }
+        if parts.first == "assets", parts.count == 2,
+           parts[1].range(of: "^[a-z0-9._-]{1,96}$", options: .regularExpression) != nil {
+            return "public/assets/\(parts[1])"
+        }
+        return "public/other"
+    }
+
     private func accept(_ connection: NWConnection) {
         connection.start(queue: queue)
         receiveHeader(connection, bytes: Data())
@@ -155,6 +177,7 @@ final class LocalAssetServer {
         }
         let method = String(tokens[0])
         guard method == "GET" || method == "HEAD" else {
+            onDiagnosticResponse?(Self.diagnosticRoute(target: target), 405)
             sendSimple(405, reason: "Method Not Allowed", connection: connection)
             return
         }
@@ -169,6 +192,7 @@ final class LocalAssetServer {
         switch route {
         case .file(_, ownerData: true), .directory:
             guard Self.authorizesOwnerRequest(expectedToken: ownerDataToken, suppliedToken: requestHeaders["x-ra2-owner-token"]) else {
+                onDiagnosticResponse?(Self.diagnosticRoute(target: target), 404)
                 sendSimple(404, reason: "Not Found", connection: connection)
                 return
             }
@@ -178,11 +202,14 @@ final class LocalAssetServer {
 
         switch route {
         case .badRequest:
+            onDiagnosticResponse?(Self.diagnosticRoute(target: target), 400)
             sendSimple(400, reason: "Bad Request", connection: connection)
         case .notFound:
+            onDiagnosticResponse?(Self.diagnosticRoute(target: target), 404)
             sendSimple(404, reason: "Not Found", connection: connection)
         case .directory(let directory):
             guard FileManager.default.fileExists(atPath: directory.path) else {
+                onDiagnosticResponse?(Self.diagnosticRoute(target: target), 404)
                 sendSimple(404, reason: "Not Found", connection: connection)
                 return
             }
@@ -193,23 +220,28 @@ final class LocalAssetServer {
                     options: [.skipsHiddenFiles]
                 ).filter { (try? $0.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true }
                     .map(\.lastPathComponent).sorted()
+                onDiagnosticResponse?(Self.diagnosticRoute(target: target), 200)
                 sendBytes(try JSONSerialization.data(withJSONObject: items), type: "application/json", ownerData: true, code: 200, range: nil, connection: connection, headOnly: method == "HEAD")
             } catch {
+                onDiagnosticResponse?(Self.diagnosticRoute(target: target), 404)
                 sendSimple(404, reason: "Not Found", connection: connection)
             }
         case .file(let url, let ownerData):
             guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
                   values.isRegularFile == true, values.isSymbolicLink != true,
                   let size = values.fileSize, size >= 0 else {
+                onDiagnosticResponse?(Self.diagnosticRoute(target: target), 404)
                 sendSimple(404, reason: "Not Found", connection: connection)
                 return
             }
             let rangeResult = Self.parseRange(requestHeaders["range"], fileSize: UInt64(size))
             switch rangeResult {
             case .failure:
+                onDiagnosticResponse?(Self.diagnosticRoute(target: target), 416)
                 let response = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */\(size)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
             case .success(let byteRange):
+                onDiagnosticResponse?(Self.diagnosticRoute(target: target), byteRange == nil ? 200 : 206)
                 sendFile(url, size: UInt64(size), ownerData: ownerData, range: byteRange, connection: connection, headOnly: method == "HEAD")
             }
         }
@@ -275,7 +307,7 @@ final class LocalAssetServer {
         })
     }
 
-    private static func mimeType(for url: URL) -> String {
+    static func mimeType(for url: URL) -> String {
         switch url.pathExtension.lowercased() {
         case "html": return "text/html; charset=utf-8"
         case "js", "mjs": return "text/javascript; charset=utf-8"

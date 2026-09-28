@@ -3,6 +3,7 @@ import type { VmShell } from '../../../adapter/runtime';
 import { keyLParam, normalizePointerButton, rescaleLogicalPointer, virtualKey, win32CharacterCode } from './input';
 import { calculateCanvasFit } from './canvasFit';
 import { installFullscreenKeyboardLock, type KeyboardLockState } from './keyboardLock';
+import { reportNativeTouch } from '../../../platform/browser/nativeDiagnostics';
 
 let canvasFitObserver: ResizeObserver | null = null;
 let canvasDprQuery: MediaQueryList | null = null;
@@ -247,6 +248,18 @@ export function installGameInput(
   }
   let touchGesture: TouchGesture | null = null;
   const activeTouches = new Set<number>();
+  const reportGesture = (gesture: string, event?: PointerEvent) => {
+    reportNativeTouch({
+      event: 'gesture',
+      gesture,
+      pointerType: event?.pointerType,
+      pointerId: event?.pointerId,
+      x: event?.clientX,
+      y: event?.clientY,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    });
+  };
   /**
    * Shift+left-click repeats 10 times: dispatch the first pair immediately, then WM_LBUTTONDOWN/UP pairs every 50ms.
    * Remove Shift from repeated-click modifiers so the game receives 10 ordinary clicks. Swallow physical up while repetition runs because each pair supplies its own; physical up after completion is delivered normally and is harmless.
@@ -504,6 +517,7 @@ export function installGameInput(
     if (!state) return;
     clearTouchTimer();
     touchGesture = null;
+    reportGesture('cancelled');
     if (state.phase === 'drag') {
       mouseFlags &= ~0x0001;
       vm.setKeyState(0x01, false);
@@ -520,6 +534,7 @@ export function installGameInput(
     const state = touchGesture;
     if (!state || state.phase !== 'pending') return;
     state.phase = 'right';
+    reportGesture('longPress');
     mouseFlags |= 0x0002;
     vm.setKeyState(0x02, true);
     vm.postMessage(0x0204, state.modifiers | 0x0002, state.downLParam); // WM_RBUTTONDOWN
@@ -554,10 +569,12 @@ export function installGameInput(
         modifiers: modifierFlags(event),
         timer: window.setTimeout(touchHoldTimer, TOUCH_LONG_PRESS_MS),
       };
+      reportGesture('pending', event);
     } else if (state.phase === 'pending') {
       // Second finger: cancel long-press/tap intent and upgrade to a two-finger gesture.
       clearTouchTimer();
       state.phase = 'two-pending';
+      reportGesture('twoPending', event);
       state.twoClientX = state.downClientX;
       state.twoClientY = state.downClientY;
     }
@@ -585,6 +602,7 @@ export function installGameInput(
       // Beyond the drag threshold, send left DOWN at the contact origin; the common path has already sent this WM_MOUSEMOVE.
       clearTouchTimer();
       state.phase = 'drag';
+      reportGesture('drag', event);
       mouseFlags |= 0x0001;
       vm.setKeyState(0x01, true);
       vm.postMessage(0x0201, state.modifiers | 0x0001, state.downLParam); // WM_LBUTTONDOWN
@@ -597,6 +615,7 @@ export function installGameInput(
       const dy = event.clientY - state.twoClientY;
       if (dx * dx + dy * dy <= slopCss * slopCss) return;
       state.phase = 'two-drag';
+      reportGesture('twoDrag', event);
       const lParam = (((logicalMouseY & 0xffff) << 16) | (logicalMouseX & 0xffff)) >>> 0;
       mouseFlags |= 0x0002;
       vm.setKeyState(0x02, true);
@@ -617,6 +636,7 @@ export function installGameInput(
       clearTouchTimer();
       // Clear state before releasing capture; lostpointercapture then sees an empty gesture and cannot clean up twice.
       touchGesture = null;
+      reportGesture(state.phase === 'pending' ? 'singleTap' : 'released', event);
       const upLParam = mouseLParam(event);
       const modifiers = modifierFlags(event);
       if (state.phase === 'pending') {
@@ -640,6 +660,7 @@ export function installGameInput(
       // In two-finger mode, release either finger to finish.
       clearTouchTimer();
       touchGesture = null;
+      reportGesture(state.phase === 'two-pending' ? 'twoTap' : 'released', event);
       if (state.phase === 'two-pending') {
         // Two-finger tap means right-click: MOVE/RDOWN/RUP all use the primary contact origin, matching trackpads.
         const modifiers = modifierFlags(event);

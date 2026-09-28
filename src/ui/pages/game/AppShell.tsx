@@ -4,6 +4,11 @@ import { BootRegion, DebugRegion, Dialogs, MainRegion, ScreenStatus, Toolbar } f
 import { gameRunning, mainPanel, sourceRequest } from './state/uiState';
 import { useStore } from '../../shared/state/useStore';
 import { usePanelWheelAcceleration } from './hooks/usePanelWheelAcceleration';
+import {
+  reportNativeRuntimeError,
+  reportNativeRuntimeEvent,
+  reportNativeRuntimePhase,
+} from '../../../platform/browser/nativeDiagnostics';
 
 /** One React tree owns all page UI; refs only form the boundary to VM graphics/input adapters. */
 export function AppShell() {
@@ -12,6 +17,8 @@ export function AppShell() {
   const choosingSource = useStore(sourceRequest) !== null;
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
+    reportNativeRuntimeEvent('web AppShell mounted');
+    reportNativeRuntimePhase('webHostBootstrapAcknowledged');
     let cancelled = false;
     let stop: (() => void) | undefined;
     void import('./page')
@@ -22,6 +29,7 @@ export function AppShell() {
       })
       .catch((error) => {
         if (!cancelled && error?.name !== 'AbortError') {
+          reportNativeRuntimeError('bootstrap', error);
           stop?.();
           mainPanel.set({ phase: 'error', detail: String(error) });
         }

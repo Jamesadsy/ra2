@@ -6,7 +6,8 @@ import { basename, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const base = process.env.ACCEPTED_BASE_SHA ?? 'f25986bb1821043ce4f3bbf3f7637330014628dd';
+const base = process.env.ACCEPTED_BASE_SHA ?? '12dc7ec83224fa88d98e7d2086e80cc6a1d9e5e5';
+const expectedBranch = 'secondsun/ra2-m1-ios-063-physical-grey-runtime';
 const [appPath, outputDirectory] = process.argv.slice(2).map((path) => resolve(path));
 if (!appPath || !outputDirectory) throw new Error('Usage: verifyAppleApp.mjs <RA2M1.app> <artifact-output-directory>');
 
@@ -14,12 +15,23 @@ const run = (command, args) => execFileSync(command, args, { cwd: repository, en
 const fail = (message) => {
   throw new Error(message);
 };
+const branch = run('git', ['branch', '--show-current']);
+const head = run('git', ['rev-parse', 'HEAD']);
+const tree = run('git', ['rev-parse', 'HEAD^{tree}']);
+const parent = run('git', ['rev-parse', 'HEAD^']);
+const mergeBase = run('git', ['merge-base', base, 'HEAD']);
+if (branch !== expectedBranch) fail('Unexpected source branch: ' + branch);
+if (mergeBase !== base) fail('The accepted 061 HEAD is not the source ancestor.');
 const plist = JSON.parse(run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(appPath, 'Info.plist')]));
 if (plist.CFBundleIdentifier !== 'org.second-sun.ra2m1') fail('Unexpected app bundle identifier.');
 if (plist.CFBundleDisplayName !== 'CnC RA2' || plist.CFBundleName !== 'CnC RA2') {
   fail(`Expected CnC RA2 app display identity, got ${plist.CFBundleDisplayName}/${plist.CFBundleName}.`);
 }
 if (!plist.CFBundleSupportedPlatforms?.includes('iPhoneOS')) fail('The app bundle is not an iPhoneOS build.');
+if (plist.CFBundleIconName !== 'AppIcon') fail('The CnC RA2 app icon catalog is not referenced by Info.plist.');
+if (plist.RA2SourceBranch !== branch || plist.RA2SourceCommit !== head) {
+  fail('The packaged app source branch/commit identity does not match this managed run.');
+}
 if (
   await stat(appPath)
     .then((value) => !value.isDirectory())
@@ -74,6 +86,31 @@ async function visit(folder) {
 }
 await visit(appPath);
 if (!files.includes(executable)) fail('App executable was not found in the bundle inventory.');
+const compiledAssetCatalog = join(appPath, 'Assets.car');
+if (!files.includes(compiledAssetCatalog)) fail('The app icon asset catalog was not compiled into Assets.car.');
+
+const webRoot = join(appPath, 'Web');
+const webIndex = await readFile(join(webRoot, 'index.html'), 'utf8');
+const routeBAssetReferences = [...webIndex.matchAll(/(?:src|href)=(["'])(\/assets\/[^"']+)\1/g)].map(
+  (match) => match[2],
+);
+if (routeBAssetReferences.length < 2) fail('The packaged public Web root is missing Route B script/style references.');
+for (const reference of routeBAssetReferences) {
+  const asset = resolve(webRoot, '.' + reference);
+  if (
+    !asset.startsWith(resolve(webRoot) + '/') ||
+    !(await stat(asset)
+      .then((value) => value.isFile())
+      .catch(() => false))
+  ) {
+    fail('A packaged Route B entry asset is missing: ' + reference);
+  }
+}
+const packagedWebAssets = await readdir(join(webRoot, 'assets'));
+if (!packagedWebAssets.some((name) => /^v86-.*\.wasm$/.test(name)))
+  fail('The packaged Route B v86 WebAssembly runtime is missing.');
+if (!packagedWebAssets.some((name) => /^vmWorker-.*\.js$/.test(name)))
+  fail('The packaged Route B VM Worker is missing.');
 
 const tracked = run('git', ['ls-files']).split(/\r?\n/).filter(Boolean);
 const untrackedPrivate = ['game/ra2/game.exe', 'game/ra2/ra2.mix', 'game/ra2/language.mix'].filter((path) =>
@@ -87,10 +124,6 @@ if (changed.some((path) => /^(game\/|\.tmp-third-party\/)|\.(exe|dll|mix|csf|fnt
   fail('A changed Git path resembles a proprietary owner-data payload.');
 }
 
-const branch = run('git', ['branch', '--show-current']);
-const head = run('git', ['rev-parse', 'HEAD']);
-const tree = run('git', ['rev-parse', 'HEAD^{tree}']);
-const parent = run('git', ['rev-parse', 'HEAD^']);
 const runId = process.env.GITHUB_RUN_ID ?? 'local';
 const runAttempt = process.env.GITHUB_RUN_ATTEMPT ?? '1';
 
@@ -99,6 +132,40 @@ async function hashFile(path) {
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest('hex');
 }
+const iconSource = join(repository, 'ios/RA2M1/Resources/AppIconSource/CnC-RA2-AppIcon.png');
+const iconRendition = join(repository, 'ios/RA2M1/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png');
+const iconContentsPath = join(repository, 'ios/RA2M1/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json');
+const iconSourceSHA256 = await hashFile(iconSource);
+if (iconSourceSHA256 !== '7cfa03758fd2abe4459da28b8370c5fa5f99ec54f5a68c18ecc76e08d2ea9d68') {
+  fail('The Drive-approved RA2 app icon source changed.');
+}
+const iconContents = JSON.parse(await readFile(iconContentsPath, 'utf8'));
+if (
+  !iconContents.images?.some(
+    (item) =>
+      item.filename === 'AppIcon.png' &&
+      item.idiom === 'universal' &&
+      item.platform === 'ios' &&
+      item.size === '1024x1024',
+  )
+) {
+  fail('The universal iOS 1024x1024 app icon catalog entry is missing.');
+}
+const iconPng = await readFile(iconRendition);
+if (
+  iconPng.toString('hex', 0, 8) !== '89504e470d0a1a0a' ||
+  iconPng.readUInt32BE(16) !== 1024 ||
+  iconPng.readUInt32BE(20) !== 1024
+) {
+  fail('The app icon rendition is not a valid 1024x1024 PNG.');
+}
+const iconRenditionSHA256 = await hashFile(iconRendition);
+const archiveEntries = run('unzip', ['-Z1', join(outputDirectory, 'CnC-RA2-unsigned.ipa')]).split(/\r?\n/);
+if (!archiveEntries.includes('Payload/RA2M1.app/Assets.car'))
+  fail('The canonical IPA is missing the compiled icon catalog.');
+const appArchiveEntries = run('unzip', ['-Z1', join(outputDirectory, 'CnC-RA2-unsigned.app.zip')]).split(/\r?\n/);
+if (!appArchiveEntries.some((entry) => entry.endsWith('/Assets.car')))
+  fail('The app archive is missing the compiled icon catalog.');
 const appHash = createHash('sha256');
 for (const path of files.sort()) {
   appHash.update(path.slice(appPath.length));
@@ -124,6 +191,18 @@ const summary = {
   signing: 'unsigned; no provisioning profile',
   fileCount: files.length,
   appBundleContentSHA256: appBundleHash,
+  appIconCatalog: 'AppIcon (universal iOS 1024x1024)',
+  compiledAssetCatalogSHA256: await hashFile(compiledAssetCatalog),
+  iconSourceSHA256,
+  iconRenditionSHA256,
+  packagedRouteB: {
+    root: 'Web/index.html',
+    entryAssetReferences: routeBAssetReferences.length,
+    v86Wasm: packagedWebAssets.find((name) => /^v86-.*\.wasm$/.test(name)),
+    vmWorker: packagedWebAssets.find((name) => /^vmWorker-.*\.js$/.test(name)),
+    ownerRoute: '/game/.list?dir=ra2',
+    ownerRangeRoute: '/game/ra2/game.exe',
+  },
   ipaSHA256: ipaSha256,
   appArchiveSHA256: appArchiveSha256,
   ownerDataFiles: 0,

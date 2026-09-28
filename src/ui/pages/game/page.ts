@@ -40,6 +40,12 @@ import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import { loadStoredResolution } from './vmPageResolution';
 import type { GameResolution } from '../../../games/resolution';
 import { isEa108IosHost, loadEa108IosOwnerGameSource } from '../../../platform/browser/ea108MobileHost';
+import {
+  reportNativeRuntimeError,
+  reportNativeRuntimeEvent,
+  reportNativeRuntimePhase,
+  reportNativeTouch,
+} from '../../../platform/browser/nativeDiagnostics';
 
 let activeVm: VmShell | null = null;
 const pageController = new VmSessionController();
@@ -57,9 +63,11 @@ let gameFrameHeight = 600;
 let refitActiveCanvas: (frameWidth?: number, frameHeight?: number) => void = () => {};
 let canvasFitInstalled = false;
 let activeFitCleanup: (() => void) | null = null;
+let nativeFirstFrameAcknowledged = false;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
+  nativeFirstFrameAcknowledged = false;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
   activeRendererCleanup?.();
   activeRendererCleanup = null;
@@ -140,6 +148,10 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     targetSize: () => ({ width: canvas.width, height: canvas.height }),
     transform: (frame) => effects.transform(frame),
     presented: () => {
+      if (!nativeFirstFrameAcknowledged) {
+        nativeFirstFrameAcknowledged = true;
+        reportNativeRuntimePhase('firstGameFrameObserved');
+      }
       effects.publishStatus(frameRenderer.upscaleStatus);
       toolbar.recordPresentedFrame();
     },
@@ -462,8 +474,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
 
   vm = await startSessionRuntime(
     () =>
-      pageController.start(({ isCurrent }) =>
-        createVmShell(
+      pageController.start(({ isCurrent }) => {
+        return createVmShell(
           guardVmCallbacks(
             createVmRuntimeCallbacks({
               canvas,
@@ -475,6 +487,10 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
               getSelectedGameId: () => selectedGameId,
               setStatus: (next) => {
                 status = next;
+                reportNativeRuntimeEvent('vm status: ' + next.phase);
+                if (next.phase === 'error' || next.phase === 'blocked') {
+                  reportNativeRuntimeError('fatalVM', next.detail);
+                }
               },
               getCallCount: () => callCount,
               setCallCount: (next) => {
@@ -505,8 +521,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
             startupPage: new URLSearchParams(window.location.search).get('start-page') || undefined,
             recycleFrames: true,
           },
-        ),
-      ),
+        );
+      }),
     (error, detail) => {
       console.error(t('[VM] 启动失败'), error);
       if (!problemPanelShown) showProblemPanel('error', detail);
@@ -517,6 +533,31 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   if (!vm) {
     if (!problemPanelShown) presenter.destroy();
     return;
+  }
+  if (isEa108IosHost()) {
+    const originalPostMessage = vm.postMessage.bind(vm);
+    vm.postMessage = (message: number, wParam = 0, lParam = 0): void => {
+      const mappedGuestEvent: Record<number, string> = {
+        0x0100: 'WM_KEYDOWN',
+        0x0101: 'WM_KEYUP',
+        0x0200: 'WM_MOUSEMOVE',
+        0x0201: 'WM_LBUTTONDOWN',
+        0x0202: 'WM_LBUTTONUP',
+        0x0204: 'WM_RBUTTONDOWN',
+        0x0205: 'WM_RBUTTONUP',
+      };
+      const name = mappedGuestEvent[message];
+      if (name) {
+        reportNativeTouch({
+          event: 'mapped',
+          mappedGuestEvent: name,
+          x: lParam & 0xffff,
+          y: (lParam >> 16) & 0xffff,
+          button: wParam & 7,
+        });
+      }
+      originalPostMessage(message, wParam, lParam);
+    };
   }
   if (panelCreated) vm.setCallTracing(true);
   vm.setGameClockRate(requestedClockRate);

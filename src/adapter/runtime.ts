@@ -24,6 +24,7 @@ import type { GuestMemRecordResult } from './memRecord';
 import type { GameFileEntry, VmInitConfig } from './vmProtocol';
 import type { VmPointerState, VmShell } from './vmShell';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
+import { reportNativeRuntimeError, reportNativeRuntimePhase } from '../platform/browser/nativeDiagnostics';
 import { withGameResolutionOverride } from '../games/resolution';
 import { randomMultiplayerName, validateMultiplayerName, withMultiplayerNameOverride } from '../games/multiplayerName';
 import { parseRa2RelayUrl, type Ra2NetworkConfig } from '../games/ra2/networkTransport';
@@ -218,7 +219,10 @@ export async function createVmShell(
 /** Main-thread mode: run v86 and the shim directly on the page thread. */
 export class Win32GameVm implements VmShell {
   private readonly audio = new WebAudioPcmSink({
-    onError: (error) => console.warn('[VM audio]', error),
+    onError: (error) => {
+      console.warn('[VM audio]', error);
+      reportNativeRuntimeError('audio', error);
+    },
     diagnosticsIntervalMs: AUDIO_DIAGNOSTICS_INTERVAL_MS,
   });
   private readonly core: VmCore;
@@ -267,6 +271,7 @@ export class Win32GameVm implements VmShell {
     window.addEventListener('pagehide', flushOnPagehide);
     this.removePagehideFlush = () => window.removeEventListener('pagehide', flushOnPagehide);
     try {
+      reportNativeRuntimePhase('vmStartupEntered');
       await this.core.start();
     } catch (error) {
       this.removePagehideFlush?.();

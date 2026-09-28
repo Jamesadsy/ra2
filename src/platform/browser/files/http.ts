@@ -1,6 +1,7 @@
 import type { GameFileProvider } from '../../../resources/contracts';
 import { normalizeGuestPath } from '../../../vm86/paths';
 import { IndexedDbWriteCache } from './writeCache';
+import { reportNativeRuntimeError, reportNativeRuntimePhase } from '../nativeDiagnostics';
 
 type FilePrefix = { bytes: Uint8Array; totalSize: number };
 const PREFIX_CACHE_MAX_BYTES = 4 * 1024 * 1024;
@@ -239,9 +240,25 @@ export class HttpGameFileProvider implements GameFileProvider {
       .then(async (response) => {
         // A 404 from the listing endpoint means the directory is definitely absent; RA2 often probes virtual @:/ paths first.
         // This differs from network/endpoint failure. Cache an empty listing to reject all loose files below that directory synchronously.
-        if (response.status === 404) return [];
-        if (!response.ok) return null;
-        return response.json() as Promise<string[]>;
+        if (directory === 'ra2' && response.status === 404) {
+          reportNativeRuntimeError('ownerData', new Error('Owner Data listing returned HTTP 404'));
+          return [];
+        }
+        if (!response.ok) {
+          if (directory === 'ra2') {
+            reportNativeRuntimeError('ownerData', new Error('Owner Data listing returned HTTP ' + response.status));
+          }
+          return null;
+        }
+        const value = (await response.json()) as unknown;
+        if (directory === 'ra2') {
+          if (Array.isArray(value) && value.every((name) => typeof name === 'string')) {
+            reportNativeRuntimePhase('ownerDataListingAcknowledged');
+          } else {
+            reportNativeRuntimeError('ownerData', new Error('Owner Data listing did not return a file list'));
+          }
+        }
+        return Array.isArray(value) ? (value as string[]) : null;
       })
       .catch(() => null)
       .then((listing) => {

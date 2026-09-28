@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cnc-ra2-ios-062-${{ github.ref }}
+  group: cnc-ra2-ios-063-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -47,16 +47,16 @@ jobs:
       - name: Install source dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify formatting and asset-free core
+      - name: Verify formatting and Route B sources
         run: |
           pnpm exec prettier --check \
             .github/workflows/ra2-m1-ios-059.yml \
-            docs/RA2_M1_IOS_HANDOFF.md \
+            docs/RA2_M1_IOS_HANDOFF.md ios/RA2M1/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json \
             scripts/ios/preparePublicBundle.mjs scripts/ios/verifyAppleApp.mjs scripts/ios/verifySourceOnly.mjs \
-            src/adapter/runtime.ts src/adapter/vmProtocol.ts src/adapter/vmWorkerController.ts src/main.ts \
+            src/adapter/runtime.ts src/adapter/vmProtocol.ts src/adapter/vmWorkerController.ts src/main.ts src/platform/browser/nativeDiagnostics.ts \
             src/adapter/audio.ts src/adapter/vmClient.ts \
             src/platform/browser/ea108MobileHost.ts src/platform/browser/files/directoryAccess.ts src/platform/browser/files/http.ts \
-            src/ui/pages/game/page.ts tests/basic/ciConfiguration.test.ts tests/basic/ea108MobileHost.test.ts \
+            src/ui/pages/game/page.ts src/ui/pages/game/AppShell.tsx src/ui/pages/game/gameInput.ts src/ui/pages/game/touchControls.ts src/ui/shared/components/UiErrorBoundary.tsx tests/basic/ciConfiguration.test.ts tests/basic/ea108MobileHost.test.ts \
             tests/basic/briefingAudioHealth.test.ts tests/real-game/browser/briefingAudioHealth.ts \
             tests/real-game/browser/ra2BrowserSmoke.mts
           pnpm run check
@@ -93,6 +93,7 @@ jobs:
           xcodebuild -project ios/RA2M1/RA2M1.xcodeproj -scheme RA2M1
           -configuration Release -sdk iphoneos -arch arm64
           -derivedDataPath "$RUNNER_TEMP/ra2-m1-derived"
+          RA2_SOURCE_BRANCH="$GITHUB_REF_NAME" RA2_SOURCE_COMMIT="$GITHUB_SHA"
           CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" build
 
       - name: Run deterministic iOS host, custody, WebKit storage and lifecycle tests
@@ -114,7 +115,7 @@ jobs:
       - name: Upload Apple proof artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: cnc-ra2-062-apple-proof
+          name: cnc-ra2-063-apple-proof
           path: ${{ runner.temp }}/ra2-m1-ios-artifacts/*
           if-no-files-found: error
           retention-days: 30

@@ -4,6 +4,7 @@ import { HttpGameFileProvider } from './files/http';
 import { ScopedGameFileProvider } from '../../resources/providers/scoped';
 import type { GameFileProvider } from '../../resources/contracts';
 import { sha256Hex } from '../../utils/sha256';
+import { reportNativeRuntimePhase } from './nativeDiagnostics';
 
 export const EA108_RA2_EXECUTABLE_SHA256 = '6fc4b410f8841ba3ad6c57b59fccae65f58a8871d86750af3c1e2d5a7c5ad39d';
 
@@ -45,6 +46,7 @@ export async function createEa108OwnerGameSource(files: GameFileProvider): Promi
     throw new Error(`Unsupported RA2 executable SHA-256: ${actualHash}`);
   }
 
+  reportNativeRuntimePhase('ownerGameSourceValidated');
   return {
     game: supportedGame('ra2'),
     files,
