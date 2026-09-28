@@ -38,7 +38,7 @@ it('Apple proof is pinned to the implementation branch and builds a source-only 
   expect(apple).toContain('node scripts/ios/verifySourceOnly.mjs');
   expect(apple).toContain('-sdk iphoneos -arch arm64');
   expect(apple).toContain('CODE_SIGNING_ALLOWED=NO');
-  expect(apple).toContain('cnc-ra2-062-apple-proof');
+  expect(apple).toContain('cnc-ra2-063-apple-proof');
   expect(apple).not.toMatch(/secrets\.|game\/ra2|ra2\.mix|binkw32\.dll/i);
   for (const match of apple.matchAll(/uses:\s+([^\s#]+)/g)) expect(match[1]).toMatch(/@[a-f0-9]{40}$/);
 });

@@ -240,8 +240,10 @@ export class HttpGameFileProvider implements GameFileProvider {
       .then(async (response) => {
         // A 404 from the listing endpoint means the directory is definitely absent; RA2 often probes virtual @:/ paths first.
         // This differs from network/endpoint failure. Cache an empty listing to reject all loose files below that directory synchronously.
-        if (directory === 'ra2' && response.status === 404) {
-          reportNativeRuntimeError('ownerData', new Error('Owner Data listing returned HTTP 404'));
+        if (response.status === 404) {
+          if (directory === 'ra2') {
+            reportNativeRuntimeError('ownerData', new Error('Owner Data listing returned HTTP 404'));
+          }
           return [];
         }
         if (!response.ok) {
