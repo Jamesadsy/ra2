@@ -4,6 +4,7 @@ import { expect, it } from 'vitest';
 const read = (file: string) => readFileSync(file, 'utf8').replaceAll('\r\n', '\n');
 const workflow = read('.github/workflows/quality-check.yml');
 const apple = read('.github/workflows/ra2-m1-ios-059.yml');
+const appleProofVerifier = read('scripts/ios/verifyAppleApp.mjs');
 const basic = workflow.split('  basic:\n')[1]!.split('  ra2:\n')[0]!;
 const ra2 = workflow.split('  ra2:\n')[1]!.split('  yr:\n')[0]!;
 const yr = workflow.split('  yr:\n')[1]!;
@@ -33,6 +34,7 @@ it('统一 CI 入口使用固定 action 与 pnpm，格式和无素材验收归 B
 
 it('Apple proof is pinned to the implementation branch and builds a source-only unsigned iPhoneOS arm64 artifact', () => {
   expect(apple).toContain('- secondsun/ra2-m1-ios-061-data-user-stage');
+  expect(appleProofVerifier).toContain("const expectedBranch = 'secondsun/ra2-m1-ios-065-case-insensitive-owner-files';");
   expect(apple).toContain('runs-on: macos-15');
   expect(apple).toContain('node-version: 24.19.0');
   expect(apple).toContain('node scripts/ios/verifySourceOnly.mjs');
