@@ -117,7 +117,7 @@ jobs:
           OUTPUT="$RUNNER_TEMP/ra2-m1-ios-artifacts"
           APP="$RUNNER_TEMP/ra2-m1-derived/Build/Products/Release-iphoneos/RA2M1.app"
           bash scripts/ios/package-ios-artifact.sh "$APP" "$OUTPUT"
-          node scripts/ios/verifyAppleApp.mjs "$APP" "$OUTPUT"
+          RA2_EXPECTED_SOURCE_BRANCH="$GITHUB_REF_NAME" node scripts/ios/verifyAppleApp.mjs "$APP" "$OUTPUT"
           cat "$OUTPUT/apple-proof-manifest.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Apple proof artifact
