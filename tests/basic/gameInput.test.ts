@@ -30,7 +30,25 @@ function setup(search = '', locked = true) {
     exitPointerLock: vi.fn(),
   });
   vi.stubGlobal('document', doc);
-  vi.stubGlobal('window', Object.assign(new EventTarget(), { location: { search }, setTimeout }));
+  const touchReports: Array<Record<string, unknown>> = [];
+  vi.stubGlobal(
+    'window',
+    Object.assign(new EventTarget(), {
+      location: { search },
+      setTimeout,
+      clearTimeout,
+      innerWidth: 800,
+      innerHeight: 600,
+      __RA2Host: { platform: 'ios', version: 1, ownerDataToken: 'never-log-this' },
+      __RA2NativeDiagnostics: {
+        phase: vi.fn(),
+        error: vi.fn(),
+        event: vi.fn(),
+        metrics: vi.fn(),
+        touch: (record: Record<string, unknown>) => touchReports.push(record),
+      },
+    }),
+  );
   vi.stubGlobal('navigator', { platform: 'Win32', userAgent: 'Windows' });
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 0;
@@ -42,7 +60,7 @@ function setup(search = '', locked = true) {
   const vm = { setCursorPosition: vi.fn(), postMessage: vi.fn(), setKeyState: vi.fn() };
   const present = vi.fn();
   installed = installGameInput(canvas as unknown as HTMLCanvasElement, vm as unknown as VmShell, true, present);
-  const pointer = (type: string, fields: Record<string, number> = {}) => {
+  const pointer = (type: string, fields: Record<string, number | boolean | string> = {}) => {
     const event = Object.assign(new Event(type, { cancelable: true }), {
       pointerType: 'mouse',
       isPrimary: true,
@@ -64,7 +82,7 @@ function setup(search = '', locked = true) {
     frames.clear();
     callbacks.forEach((callback) => callback(0));
   };
-  return { canvas, doc, vm, present, pointer, frames, flush };
+  return { canvas, doc, vm, present, pointer, frames, flush, touchReports };
 }
 
 describe('桌面鼠标跟手性', () => {
@@ -181,5 +199,112 @@ describe('桌面鼠标跟手性', () => {
     expect(canvas.requestPointerLock).toHaveBeenCalledExactlyOnceWith(
       search === '?raw-mouse=1' ? { unadjustedMovement: true } : undefined,
     );
+  });
+});
+
+describe('iOS 触摸到原生消息映射', () => {
+  const touch = (pointerId: number, clientX: number, clientY: number, isPrimary = true) => ({
+    pointerType: 'touch',
+    pointerId,
+    clientX,
+    clientY,
+    isPrimary,
+  });
+
+  it('阈值后的拖动以 MK_LBUTTON 发送完整普通选择框序列', () => {
+    const { vm, pointer, touchReports } = setup('', false);
+    pointer('pointerdown', touch(11, 100, 120));
+    pointer('pointermove', touch(11, 115, 135));
+    pointer('pointerup', touch(11, 115, 135));
+
+    expect(vm.postMessage.mock.calls.map(([message, flags]) => [message, flags])).toEqual([
+      [0x0201, 0x0001],
+      [0x0200, 0x0001],
+      [0x0202, 0x0000],
+    ]);
+    const selection = touchReports.find((record) => record.gesture === 'selectionReplaced');
+    expect(selection).toMatchObject({
+      startX: 100,
+      startY: 120,
+      endX: 115,
+      endY: 135,
+      logicalStartX: 100,
+      logicalStartY: 120,
+      logicalEndX: 115,
+      logicalEndY: 135,
+      mouseFlagsDuringGesture: 1,
+      wmSequence: 'WM_LBUTTONDOWN>WM_MOUSEMOVE>WM_LBUTTONUP',
+      mouseFlagsSequence: '1>1>0',
+    });
+
+    vm.postMessage.mockClear();
+    pointer('pointerdown', touch(14, 700, 500));
+    pointer('pointermove', touch(14, 720, 520));
+    pointer('pointerup', touch(14, 720, 520));
+    // Empty-box clearing remains ordinary RA2 selection behavior; the adapter sends no unit IDs or memory edits.
+    expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x0201, 0x0200, 0x0202]);
+  });
+
+  it('简单点按仍发送 MOVE/DOWN/UP；长按仍发送右键', () => {
+    vi.useFakeTimers();
+    const { vm, pointer } = setup('', false);
+    pointer('pointerdown', touch(12, 200, 180));
+    pointer('pointerup', touch(12, 200, 180));
+    expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x0200, 0x0201, 0x0202]);
+
+    vm.postMessage.mockClear();
+    pointer('pointerdown', touch(13, 200, 180));
+    vi.advanceTimersByTime(400);
+    pointer('pointerup', touch(13, 200, 180));
+    expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x0204, 0x0205]);
+  });
+
+  it('后台/失焦取消拖选时补发 UP 并清除 held input', () => {
+    const { canvas, vm, pointer } = setup('', false);
+    pointer('pointerdown', touch(15, 100, 100));
+    pointer('pointermove', touch(15, 120, 120));
+    canvas.dispatchEvent(new Event('blur'));
+    expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x0201, 0x0200, 0x0202]);
+    expect(vm.setKeyState).toHaveBeenLastCalledWith(0x01, false);
+  });
+
+  it('双指轻点仍保留原生右键点击序列', () => {
+    const { vm, pointer } = setup('', false);
+    pointer('pointerdown', touch(16, 300, 250));
+    pointer('pointerdown', touch(17, 320, 250, false));
+    pointer('pointerup', touch(17, 320, 250, false));
+    expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x0200, 0x0204, 0x0205]);
+  });
+
+  it.each([
+    ['left', 80, 100, 110, 100],
+    ['right', 120, 100, 90, 100],
+    ['up', 100, 80, 100, 110],
+    ['down', 100, 120, 100, 90],
+  ])('双指向%s时 cursor 反向移动、相机同向移动', (_direction, primaryX, primaryY, expectedX, expectedY) => {
+    const { vm, pointer, present, touchReports } = setup('', false);
+    pointer('pointerdown', touch(21, 100, 100));
+    pointer('pointerdown', touch(22, 120, 100, false));
+    pointer('pointermove', touch(21, primaryX, primaryY));
+
+    expect(vm.postMessage.mock.calls.map(([message, flags]) => [message, flags])).toEqual([
+      [0x0204, 0x0002],
+      [0x0200, 0x0002],
+    ]);
+    expect(vm.setCursorPosition).toHaveBeenLastCalledWith(expectedX, expectedY);
+    expect(present).toHaveBeenLastCalledWith(expectedX, expectedY, false);
+    const pan = touchReports.filter((record) => record.gesture === 'twoPan').at(-1);
+    expect(pan).toMatchObject({
+      cameraDeltaX: primaryX === 80 ? -10 : primaryX === 120 ? 10 : 0,
+      cameraDeltaY: primaryY === 80 ? -10 : primaryY === 120 ? 10 : 0,
+      mouseDeltaX: expectedX - 100,
+      mouseDeltaY: expectedY - 100,
+      mouseFlags: 2,
+      wmSequence: 'WM_RBUTTONDOWN>WM_MOUSEMOVE',
+      mouseFlagsSequence: '2>2',
+    });
+    pointer('pointercancel', touch(21, primaryX, primaryY));
+    expect(vm.postMessage.mock.calls.at(-1)?.[0]).toBe(0x0205);
+    expect(vm.setKeyState).toHaveBeenLastCalledWith(0x02, false);
   });
 });

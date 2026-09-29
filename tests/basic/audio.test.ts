@@ -254,18 +254,19 @@ describe('DirectSound 流式音乐（RA2 增补，原 audioSmoke）', () => {
       constructor(
         private readonly frames: number,
         private readonly channels: number,
+        private readonly sampleRate: number,
       ) {
         super();
       }
       process(): FakeAudioBuffer {
-        const output = new FakeAudioBuffer(this.channels, this.frames, 22_050);
+        const output = new FakeAudioBuffer(this.channels, this.frames, this.sampleRate);
         this.onaudioprocess?.({ outputBuffer: output });
         return output;
       }
     }
     class FakeAudioContext {
       currentTime = 0;
-      sampleRate = 22_050;
+      sampleRate = 48_000;
       state = 'running';
       destination = new FakeNode();
       readonly sources: FakeSource[] = [];
@@ -279,7 +280,7 @@ describe('DirectSound 流式音乐（RA2 增补，原 audioSmoke）', () => {
         return source;
       }
       createScriptProcessor(frames: number, _inputs: number, channels: number): FakeProcessor {
-        const processor = new FakeProcessor(frames, channels);
+        const processor = new FakeProcessor(frames, channels, this.sampleRate);
         this.processors.push(processor);
         return processor;
       }
@@ -315,6 +316,7 @@ describe('DirectSound 流式音乐（RA2 增补，原 audioSmoke）', () => {
     expect(fakeContext.processors.length).toBe(1);
     const output = fakeContext.processors[0]!.process();
     expect(output.getChannelData(0)[0]).toBeGreaterThan(0.99);
+    expect(output.getChannelData(0)[1]).toBeCloseTo(1 - 22_050 / 48_000, 4);
     expect(output.getChannelData(1)[0]).toBe(0);
     // Subsequent Unlock calls only update PCM; they do not create a new source/processor.
     streamingSink.writeBuffer('music', 30_000, Uint8Array.from([1, 2, 3, 4]));
@@ -322,6 +324,18 @@ describe('DirectSound 流式音乐（RA2 增补，原 audioSmoke）', () => {
     expect(fakeContext.processors.length).toBe(1);
     expect(streamingSink.getState('music')!.positionBytes).toBeGreaterThan(5_512 * 4);
     expect(streamingSink.getState('music')?.playing).toBe(true);
+    expect(streamingSink.setFrequency('music', 22_491)).toBe(true);
+    const progress = streamingSink.getProgressSnapshot();
+    expect(progress.buffers[0]).toMatchObject({
+      sampleRate: 22_050,
+      channels: 2,
+      bitsPerSample: 16,
+      frequency: 22_491,
+      writeCount: 3,
+      frequencyChangeCount: 1,
+      scriptStream: true,
+    });
+    expect(progress.buffers[0]?.writeAgeMs).toBeGreaterThanOrEqual(0);
   });
 
   // DSBLOCK_ENTIREBUFFER with dwBytes=0 must still return the entire buffer.

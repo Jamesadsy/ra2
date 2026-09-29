@@ -169,6 +169,7 @@ export function installCanvasFit(
 
 export interface InstalledGameInput {
   adaptResolution(width: number, height: number): void;
+  release(): void;
   cleanup(): void;
 }
 
@@ -243,22 +244,50 @@ export function installGameInput(
     /** Primary finger's client position when entering two-finger mode; anchor for detecting two-finger drags. */
     twoClientX: number;
     twoClientY: number;
+    twoStartClientX: number;
+    twoStartClientY: number;
     modifiers: number;
     timer: number;
+    wmSequence: string[];
+    mouseFlagsSequence: number[];
   }
   let touchGesture: TouchGesture | null = null;
   const activeTouches = new Set<number>();
-  const reportGesture = (gesture: string, event?: PointerEvent) => {
+  const touchPoints = new Map<number, { x: number; y: number }>();
+  let lastPanDiagnosticAt = 0;
+  const reportGesture = (gesture: string, event?: PointerEvent, extra: Record<string, number | string> = {}) => {
+    const state = touchGesture;
+    const endX = event?.clientX ?? state?.downClientX ?? 0;
+    const endY = event?.clientY ?? state?.downClientY ?? 0;
     reportNativeTouch({
       event: 'gesture',
       gesture,
       pointerType: event?.pointerType,
       pointerId: event?.pointerId,
-      x: event?.clientX,
-      y: event?.clientY,
+      x: endX,
+      y: endY,
+      startX: state?.downClientX,
+      startY: state?.downClientY,
+      endX,
+      endY,
+      logicalStartX: state?.downX,
+      logicalStartY: state?.downY,
+      wmSequence: state?.wmSequence.join('>'),
+      mouseFlagsSequence: state?.mouseFlagsSequence.join('>'),
+      mouseFlags,
+      modifiers: state?.modifiers,
       viewportWidth: window.innerWidth,
       viewportHeight: window.innerHeight,
+      ...extra,
     });
+  };
+  const recordTouchMessage = (message: string, flags: number, _lParam: number) => {
+    const state = touchGesture;
+    if (!state) return;
+    state.wmSequence.push(message);
+    state.mouseFlagsSequence.push(flags & 0x0003);
+    if (state.wmSequence.length > 32) state.wmSequence.shift();
+    if (state.mouseFlagsSequence.length > 32) state.mouseFlagsSequence.shift();
   };
   /**
    * Shift+left-click repeats 10 times: dispatch the first pair immediately, then WM_LBUTTONDOWN/UP pairs every 50ms.
@@ -296,16 +325,20 @@ export function installGameInput(
       mouseFlags |= 0x0002;
       vm.setKeyState(0x02, true);
       vm.postMessage(0x0204, modifiers | 0x0002, downLParam); // WM_RBUTTONDOWN
+      recordTouchMessage('WM_RBUTTONDOWN', modifiers | 0x0002, downLParam);
       mouseFlags &= ~0x0002;
       vm.setKeyState(0x02, false);
       vm.postMessage(0x0205, modifiers, downLParam); // WM_RBUTTONUP
+      recordTouchMessage('WM_RBUTTONUP', modifiers, downLParam);
     } else {
       mouseFlags |= 0x0001;
       vm.setKeyState(0x01, true);
       vm.postMessage(0x0201, modifiers | 0x0001, downLParam);
+      recordTouchMessage('WM_LBUTTONDOWN', modifiers | 0x0001, downLParam);
       mouseFlags &= ~0x0001;
       vm.setKeyState(0x01, false);
       vm.postMessage(0x0202, modifiers, downLParam); // WM_LBUTTONUP
+      recordTouchMessage('WM_LBUTTONUP', modifiers, downLParam);
       // Capture local multiplayer smoke click sequences so recorded host/join paths can replay automatically.
       console.log(`[click-seq] ${downLParam & 0xffff},${(downLParam >>> 16) & 0xffff}`);
     }
@@ -516,18 +549,22 @@ export function installGameInput(
     const state = touchGesture;
     if (!state) return;
     clearTouchTimer();
-    touchGesture = null;
-    reportGesture('cancelled');
     if (state.phase === 'drag') {
       mouseFlags &= ~0x0001;
       vm.setKeyState(0x01, false);
       vm.postMessage(0x0202, state.modifiers, lParam);
+      recordTouchMessage('WM_LBUTTONUP', state.modifiers, lParam);
     } else if (state.phase === 'right' || state.phase === 'two-drag') {
       mouseFlags &= ~0x0002;
       vm.setKeyState(0x02, false);
       vm.postMessage(0x0205, state.modifiers, lParam);
+      recordTouchMessage('WM_RBUTTONUP', state.modifiers, lParam);
     }
     // pending / two-pending phases have sent no button down and need no compensating up.
+    reportGesture('cancelled', undefined, { logicalEndX: lParam & 0xffff, logicalEndY: (lParam >>> 16) & 0xffff });
+    touchGesture = null;
+    activeTouches.clear();
+    touchPoints.clear();
   };
 
   const touchHoldTimer = () => {
@@ -538,6 +575,7 @@ export function installGameInput(
     mouseFlags |= 0x0002;
     vm.setKeyState(0x02, true);
     vm.postMessage(0x0204, state.modifiers | 0x0002, state.downLParam); // WM_RBUTTONDOWN
+    recordTouchMessage('WM_RBUTTONDOWN', state.modifiers | 0x0002, state.downLParam);
     if (typeof navigator.vibrate === 'function') navigator.vibrate(40);
   };
 
@@ -546,6 +584,7 @@ export function installGameInput(
     setControlsCollapsed(true);
     canvas.focus({ preventScroll: true });
     activeTouches.add(event.pointerId);
+    touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
     const state = touchGesture;
     if (!state) {
       // First finger starts a single-finger gesture; require all other fingers released before starting another to avoid residual contacts.
@@ -566,17 +605,24 @@ export function installGameInput(
         downClientY: event.clientY,
         twoClientX: 0,
         twoClientY: 0,
+        twoStartClientX: 0,
+        twoStartClientY: 0,
         modifiers: modifierFlags(event),
         timer: window.setTimeout(touchHoldTimer, TOUCH_LONG_PRESS_MS),
+        wmSequence: [],
+        mouseFlagsSequence: [],
       };
-      reportGesture('pending', event);
+      reportGesture('pending', event, { logicalStartX: x, logicalStartY: y });
     } else if (state.phase === 'pending') {
       // Second finger: cancel long-press/tap intent and upgrade to a two-finger gesture.
       clearTouchTimer();
       state.phase = 'two-pending';
       reportGesture('twoPending', event);
-      state.twoClientX = state.downClientX;
-      state.twoClientY = state.downClientY;
+      const points = [...touchPoints.values()];
+      state.twoClientX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+      state.twoClientY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+      state.twoStartClientX = state.twoClientX;
+      state.twoStartClientY = state.twoClientY;
     }
     // Ignore extra fingers after single-finger drag/right or during two-finger phases.
     try {
@@ -590,6 +636,7 @@ export function installGameInput(
   const handleTouchPointerMove = (event: PointerEvent) => {
     const state = touchGesture;
     if (!state) return;
+    touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
     const rect = currentCanvasRect(canvas);
     const slopCss = Math.max(3, (5 * (rect.width || 1)) / getFrameSize().width);
     if (state.phase === 'pending') {
@@ -599,28 +646,70 @@ export function installGameInput(
       // Express the threshold in game pixels, about 5px, independently of canvas CSS scale; avoid false drags when enlarged
       // and sluggish gestures when reduced or on phones.
       if (dx * dx + dy * dy <= slopCss * slopCss) return;
-      // Beyond the drag threshold, send left DOWN at the contact origin; the common path has already sent this WM_MOUSEMOVE.
+      // Ordinary Win32 selection drag: DOWN, WM_MOUSEMOVE carrying MK_LBUTTON, then UP.
+      // Supplying the held-button flag is what distinguishes selection from a plain destination cursor move.
       clearTouchTimer();
       state.phase = 'drag';
-      reportGesture('drag', event);
+      reportGesture('selectDrag', event, { logicalStartX: state.downX, logicalStartY: state.downY });
       mouseFlags |= 0x0001;
       vm.setKeyState(0x01, true);
       vm.postMessage(0x0201, state.modifiers | 0x0001, state.downLParam); // WM_LBUTTONDOWN
+      recordTouchMessage('WM_LBUTTONDOWN', state.modifiers | 0x0001, state.downLParam);
       return;
     }
-    if (state.phase === 'two-pending') {
-      // If either finger exceeds the movement threshold, press right to begin panning. The cursor is already at the primary finger
-      // through the common path; subsequent movement invokes native right-drag map scrolling.
-      const dx = event.clientX - state.twoClientX;
-      const dy = event.clientY - state.twoClientY;
-      if (dx * dx + dy * dy <= slopCss * slopCss) return;
-      state.phase = 'two-drag';
-      reportGesture('twoDrag', event);
-      const lParam = (((logicalMouseY & 0xffff) << 16) | (logicalMouseX & 0xffff)) >>> 0;
-      mouseFlags |= 0x0002;
-      vm.setKeyState(0x02, true);
-      vm.postMessage(0x0204, state.modifiers | 0x0002, lParam); // WM_RBUTTONDOWN
-      if (typeof navigator.vibrate === 'function') navigator.vibrate(20);
+    if (state.phase === 'two-pending' || state.phase === 'two-drag') {
+      // Direct manipulation: finger delta and visible world delta share a sign. The native RA2 right-drag
+      // pans opposite the cursor, so invert the cursor delta while MK_RBUTTON is held.
+      const points = [...touchPoints.values()];
+      if (points.length < 2) return;
+      const centerX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+      const centerY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+      const dx = centerX - state.twoClientX;
+      const dy = centerY - state.twoClientY;
+      state.twoClientX = centerX;
+      state.twoClientY = centerY;
+      let appliedDx = dx;
+      let appliedDy = dy;
+      const startedPan = state.phase === 'two-pending';
+      if (state.phase === 'two-pending') {
+        const totalDx = centerX - state.twoStartClientX;
+        const totalDy = centerY - state.twoStartClientY;
+        if (totalDx * totalDx + totalDy * totalDy <= slopCss * slopCss) return;
+        appliedDx = totalDx;
+        appliedDy = totalDy;
+        state.phase = 'two-drag';
+        mouseFlags |= 0x0002;
+        vm.setKeyState(0x02, true);
+        const downLParam = (((logicalMouseY & 0xffff) << 16) | (logicalMouseX & 0xffff)) >>> 0;
+        vm.postMessage(0x0204, state.modifiers | 0x0002, downLParam); // WM_RBUTTONDOWN
+        recordTouchMessage('WM_RBUTTONDOWN', state.modifiers | 0x0002, downLParam);
+        if (typeof navigator.vibrate === 'function') navigator.vibrate(20);
+      }
+      const mouseDeltaX = appliedDx === 0 ? 0 : -(appliedDx * logicalFrameWidth) / (rect.width || 1);
+      const mouseDeltaY = appliedDy === 0 ? 0 : -(appliedDy * logicalFrameHeight) / (rect.height || 1);
+      logicalMouseX = Math.max(0, Math.min(logicalFrameWidth - 1, logicalMouseX + mouseDeltaX));
+      logicalMouseY = Math.max(0, Math.min(logicalFrameHeight - 1, logicalMouseY + mouseDeltaY));
+      const x = Math.floor(logicalMouseX);
+      const y = Math.floor(logicalMouseY);
+      const lParam = (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0;
+      vm.setCursorPosition(x, y);
+      onCursorPresentation?.(x, y, document.pointerLockElement === canvas);
+      vm.postMessage(0x0200, state.modifiers | mouseFlags, lParam); // WM_MOUSEMOVE with MK_RBUTTON
+      recordTouchMessage('WM_MOUSEMOVE', state.modifiers | mouseFlags, lParam);
+      const now = performance.now();
+      if (startedPan || now - lastPanDiagnosticAt >= 100) {
+        lastPanDiagnosticAt = now;
+        reportGesture('twoPan', event, {
+          translationX: appliedDx,
+          translationY: appliedDy,
+          mouseDeltaX,
+          mouseDeltaY,
+          cameraDeltaX: dx,
+          cameraDeltaY: dy,
+          logicalEndX: x,
+          logicalEndY: y,
+        });
+      }
       return;
     }
     // In drag/right/two-drag phases, the common path and cleanup logic handle cursor and button state.
@@ -628,15 +717,13 @@ export function installGameInput(
 
   const handleTouchPointerUp = (event: PointerEvent) => {
     activeTouches.delete(event.pointerId);
+    touchPoints.delete(event.pointerId);
     const state = touchGesture;
     if (!state) return;
     const single = state.phase === 'pending' || state.phase === 'drag' || state.phase === 'right';
     if (single) {
       if (event.pointerId !== state.pointerId) return;
       clearTouchTimer();
-      // Clear state before releasing capture; lostpointercapture then sees an empty gesture and cannot clean up twice.
-      touchGesture = null;
-      reportGesture(state.phase === 'pending' ? 'singleTap' : 'released', event);
       const upLParam = mouseLParam(event);
       const modifiers = modifierFlags(event);
       if (state.phase === 'pending') {
@@ -644,38 +731,64 @@ export function installGameInput(
         // turn a tap into a drag; otherwise the game sees different start/end positions,
         // moves only the cursor, and ignores the click. Double taps likewise send a complete second physical click.
         vm.postMessage(0x0200, modifiers, state.downLParam); // Return the cursor to the contact origin.
+        recordTouchMessage('WM_MOUSEMOVE', modifiers, state.downLParam);
         // Mobile adaptation: move to the target, read memory to confirm cursor shape, then press the button;
         // attack/move destinations use right-click, while empty ground, friendly units, and UI use left-click.
         scheduleTapClick(state.downLParam, modifiers);
       } else if (state.phase === 'drag') {
         mouseFlags &= ~0x0001;
         vm.setKeyState(0x01, false);
-        vm.postMessage(0x0202, modifiers, upLParam);
+        const upModifiers = modifiers & ~0x0001;
+        vm.postMessage(0x0202, upModifiers, upLParam);
+        recordTouchMessage('WM_LBUTTONUP', upModifiers, upLParam);
       } else {
         mouseFlags &= ~0x0002;
         vm.setKeyState(0x02, false);
-        vm.postMessage(0x0205, modifiers, upLParam);
+        const upModifiers = modifiers & ~0x0002;
+        vm.postMessage(0x0205, upModifiers, upLParam);
+        recordTouchMessage('WM_RBUTTONUP', upModifiers, upLParam);
       }
+      reportGesture(
+        state.phase === 'pending' ? 'singleTap' : state.phase === 'drag' ? 'selectionReplaced' : 'released',
+        event,
+        {
+          logicalEndX: upLParam & 0xffff,
+          logicalEndY: (upLParam >>> 16) & 0xffff,
+          mouseFlagsDuringGesture: state.phase === 'drag' ? 1 : state.phase === 'right' ? 2 : 0,
+        },
+      );
+      // Clear state before releasing capture; lostpointercapture then sees an empty gesture and cannot clean up twice.
+      touchGesture = null;
     } else {
       // In two-finger mode, release either finger to finish.
       clearTouchTimer();
-      touchGesture = null;
-      reportGesture(state.phase === 'two-pending' ? 'twoTap' : 'released', event);
       if (state.phase === 'two-pending') {
         // Two-finger tap means right-click: MOVE/RDOWN/RUP all use the primary contact origin, matching trackpads.
         const modifiers = modifierFlags(event);
         vm.postMessage(0x0200, modifiers, state.downLParam);
+        recordTouchMessage('WM_MOUSEMOVE', modifiers, state.downLParam);
         vm.postMessage(0x0204, modifiers | 0x0002, state.downLParam);
         vm.postMessage(0x0205, modifiers, state.downLParam);
+        recordTouchMessage('WM_RBUTTONDOWN', modifiers | 0x0002, state.downLParam);
+        recordTouchMessage('WM_RBUTTONUP', modifiers, state.downLParam);
       } else {
         // two-drag ends panning: release right-click and leave the cursor at the primary finger, even if the secondary finger was released.
         const modifiers = modifierFlags(event);
         const upLParam = (((logicalMouseY & 0xffff) << 16) | (logicalMouseX & 0xffff)) >>> 0;
         vm.postMessage(0x0200, modifiers, upLParam);
+        recordTouchMessage('WM_MOUSEMOVE', modifiers, upLParam);
         mouseFlags &= ~0x0002;
         vm.setKeyState(0x02, false);
-        vm.postMessage(0x0205, modifiers, upLParam); // WM_RBUTTONUP
+        const upModifiers = modifiers & ~0x0002;
+        vm.postMessage(0x0205, upModifiers, upLParam); // WM_RBUTTONUP
+        recordTouchMessage('WM_RBUTTONUP', upModifiers, upLParam);
       }
+      reportGesture(state.phase === 'two-pending' ? 'twoTap' : 'released', event, {
+        logicalEndX: logicalMouseX,
+        logicalEndY: logicalMouseY,
+        mouseFlagsDuringGesture: state.phase === 'two-drag' ? 2 : 0,
+      });
+      touchGesture = null;
     }
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     event.preventDefault();
@@ -686,6 +799,8 @@ export function installGameInput(
     compatibilityCtrlPrimaryActive = false;
     cancelDesktopMove();
     cancelTouchGesture();
+    activeTouches.clear();
+    touchPoints.clear();
     cancelShiftBurst();
     releaseMouseButtons();
     releaseKeys();
@@ -728,12 +843,15 @@ export function installGameInput(
     'pointermove',
     (event) => {
       if (event.pointerType === 'touch') {
-        // Every finger enters the gesture machine, since either may trigger a two-finger drag; only the primary finger uses the common path
-        // to send WM_MOUSEMOVE. During two-finger panning, the edge-cursor timer instead
-        // drives position here, avoiding movement that conflicts with the panning direction.
-        // The cursor always follows the primary finger; two-finger drags hold right-click so the map pans with it.
-        if (event.isPrimary) vm.postMessage(0x0200, modifierFlags(event), mouseLParam(event));
         handleTouchPointerMove(event);
+        // Two-finger panning owns cursor mapping and suppresses the ordinary primary-finger path.
+        // Other touch movement carries MK_* so native drag-selection is unambiguous.
+        if (event.isPrimary && touchGesture?.phase !== 'two-pending' && touchGesture?.phase !== 'two-drag') {
+          const lParam = mouseLParam(event);
+          const flags = modifierFlags(event) | mouseFlags;
+          vm.postMessage(0x0200, flags, lParam);
+          if (touchGesture?.phase === 'drag') recordTouchMessage('WM_MOUSEMOVE', flags, lParam);
+        }
         event.preventDefault();
         return;
       }
@@ -1061,6 +1179,7 @@ export function installGameInput(
 
   return {
     adaptResolution,
+    release: releaseInput,
     cleanup() {
       releaseInput();
       removers.splice(0).forEach((remove) => remove());

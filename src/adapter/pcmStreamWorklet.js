@@ -113,9 +113,17 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
           break;
         }
       }
-      const base = Math.floor(frame) * state.channels;
+      const sourceFrame = frame % state.frames;
+      const lowerFrame = Math.floor(sourceFrame);
+      const nextFrame = state.loop ? (lowerFrame + 1) % state.frames : Math.min(lowerFrame + 1, state.frames - 1);
+      const fraction = sourceFrame - lowerFrame;
+      const base = lowerFrame * state.channels;
+      const nextBase = nextFrame * state.channels;
       for (let channel = 0; channel < output.length; channel++) {
-        output[channel][i] = state.pcm[base + Math.min(channel, state.channels - 1)];
+        const sourceChannel = Math.min(channel, state.channels - 1);
+        const first = state.pcm[base + sourceChannel];
+        const next = state.pcm[nextBase + sourceChannel];
+        output[channel][i] = first + (next - first) * fraction;
       }
       frame += state.step;
     }

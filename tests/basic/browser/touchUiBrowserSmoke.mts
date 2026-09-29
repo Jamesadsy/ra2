@@ -100,6 +100,42 @@ try {
       await page.touchscreen.tap(x, y);
       await expect(controls).toBeVisible();
       await expect(controls).toHaveClass(/collapsed/);
+
+      await page.evaluate(async () => {
+        document.documentElement.dataset.hostPlatform = 'ios';
+        const stateUrl = '/src/ui/pages/game/state/uiState.ts';
+        const { controlsCollapsed } = await import(stateUrl);
+        controlsCollapsed.set(true);
+      });
+      await expect(rail).toHaveClass(/collapsed/);
+      const compact = await page.evaluate(() => {
+        const rail = document.querySelector<HTMLElement>('#vm-controls')!;
+        const toggle = document.querySelector<HTMLElement>('#vm-controls-toggle')!;
+        const outer = rail.getBoundingClientRect();
+        const inner = toggle.getBoundingClientRect();
+        const outside = document.elementFromPoint(outer.left + 70, outer.top + 22);
+        return {
+          width: outer.width,
+          height: outer.height,
+          hitboxWidth: inner.width,
+          hitboxHeight: inner.height,
+          safeTop: Number.parseFloat(getComputedStyle(rail).top) || 0,
+          outsideIntercepted: !!outside?.closest('#vm-controls'),
+        };
+      });
+      expect(compact).toMatchObject({
+        width: 44,
+        height: 44,
+        hitboxWidth: 44,
+        hitboxHeight: 44,
+        outsideIntercepted: false,
+      });
+      expect(compact.safeTop).toBeGreaterThanOrEqual(8);
+      await page.locator('#vm-controls-toggle').click();
+      await expect(rail).not.toHaveClass(/collapsed/);
+      await page.locator('#vm-controls-toggle').click();
+      await expect(rail).toHaveClass(/collapsed/);
+
       await page.evaluate(() => (window as unknown as { cleanupTouchUi(): void }).cleanupTouchUi());
       await page.touchscreen.tap(x, y);
       await expect(controls).toBeHidden();

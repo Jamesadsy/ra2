@@ -8,6 +8,7 @@ import type { VmAttachResult, VmPointerState } from './vmShell';
 import type { VmCallBatch, VmPhase } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
 import type { Ra2NetworkConfig } from '../games/ra2/networkTransport';
+import type { VmLifecycleAction, VmLifecycleSnapshot } from './vmLifecycle';
 
 /** Main-thread/Worker message protocol. Array fields (PCM/frames/EXE) transfer ownership; a single FIFO channel preserves order. */
 
@@ -74,6 +75,7 @@ export type MainToWorkerMessage =
   /** Previous frame no longer referenced by the page; separate from ACK because the current frame is still needed for cursor redraws. */
   | { type: 'recycle-frame'; buffer: ArrayBuffer }
   | { type: 'flush'; requestId: number }
+  | { type: 'lifecycle'; action: VmLifecycleAction; requestId: number }
   | { type: 'control'; action: 'start'; requestId: number }
   | { type: 'control'; action: 'stop'; requestId: number };
 
@@ -103,6 +105,7 @@ export type WorkerToMainMessage =
   | { type: 'audio-control'; action: 'destroy' }
   | { type: 'init-done'; requestId: number }
   | { type: 'flush-done'; requestId: number }
+  | { type: 'lifecycle-reply'; action: VmLifecycleAction; requestId: number; value: VmLifecycleSnapshot }
   | { type: 'control-done'; action: 'start' | 'stop'; requestId: number }
   | { type: 'error'; message: string; requestId?: number };
 

@@ -703,6 +703,18 @@ export class ShimState {
     return this.clock.setRate(rate);
   }
 
+  pauseGuestClockForLifecycle(): number {
+    return this.clock.pause();
+  }
+
+  resumeGuestClockForLifecycle(): number {
+    return this.clock.resume();
+  }
+
+  inspectGuestClockForLifecycle(): { guestTimeMs: number; paused: boolean } {
+    return { guestTimeMs: this.clock.now(), paused: this.clock.isPaused() };
+  }
+
   inspectHeapState(): VmHeapState {
     return {
       liveAllocations: this.allocations.size,

@@ -34,15 +34,13 @@ it('统一 CI 入口使用固定 action 与 pnpm，格式和无素材验收归 B
 
 it('Apple proof is pinned to the implementation branch and builds a source-only unsigned iPhoneOS arm64 artifact', () => {
   expect(apple).toContain('- secondsun/ra2-m1-ios-061-data-user-stage');
-  expect(appleProofVerifier).toContain(
-    "const expectedBranch = 'secondsun/ra2-m1-ios-065-case-insensitive-owner-files';",
-  );
+  expect(appleProofVerifier).toContain("const expectedBranch = 'secondsun/ra2-m1-ios-066-physical-polish';");
   expect(apple).toContain('runs-on: macos-15');
   expect(apple).toContain('node-version: 24.19.0');
   expect(apple).toContain('node scripts/ios/verifySourceOnly.mjs');
   expect(apple).toContain('-sdk iphoneos -arch arm64');
   expect(apple).toContain('CODE_SIGNING_ALLOWED=NO');
-  expect(apple).toContain('cnc-ra2-063-apple-proof');
+  expect(apple).toContain('cnc-ra2-066-apple-proof');
   expect(apple).not.toMatch(/secrets\.|game\/ra2|ra2\.mix|binkw32\.dll/i);
   for (const match of apple.matchAll(/uses:\s+([^\s#]+)/g)) expect(match[1]).toMatch(/@[a-f0-9]{40}$/);
 });

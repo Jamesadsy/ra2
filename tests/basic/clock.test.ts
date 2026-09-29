@@ -81,6 +81,51 @@ describe('ScaledClock', () => {
     expect(clock.now()).toBe(250);
     expect(clock.wallNow()).toBe(50_250);
   });
+
+  it.each([2_000, 20 * 60_000 + 46_000])('暂停期间冻结 guest/timeGetTime 基准，elapsed=%sms', (backgroundMs) => {
+    const host = fakeClock();
+    const clock = new ScaledClock(host.now);
+    host.advance(750);
+    const beforeBackground = clock.now();
+    expect(clock.pause()).toBe(beforeBackground);
+    expect(clock.isPaused()).toBe(true);
+    host.advance(backgroundMs);
+    expect(clock.now()).toBe(beforeBackground);
+    expect(clock.resume()).toBe(beforeBackground);
+    expect(clock.isPaused()).toBe(false);
+    host.advance(250);
+    expect(clock.now()).toBe(beforeBackground + 250);
+  });
+
+  it('多次短/长 lifecycle cycle 保持原倍率和连续 guest 时间', () => {
+    const host = fakeClock(0);
+    const clock = new ScaledClock(host.now);
+    clock.setRate(2);
+    host.advance(100);
+    expect(clock.pause()).toBe(200);
+    host.advance(1_000);
+    expect(clock.resume()).toBe(200);
+    host.advance(50);
+    expect(clock.pause()).toBe(300);
+    host.advance(20 * 60_000);
+    expect(clock.resume()).toBe(300);
+    host.advance(25);
+    expect(clock.now()).toBe(350);
+    expect(clock.getRate()).toBe(2);
+  });
+
+  it('暂停中切换游戏倍率不会把背景耗时计入 guest 时钟', () => {
+    const host = fakeClock(0);
+    const clock = new ScaledClock(host.now);
+    host.advance(100);
+    clock.pause();
+    host.advance(10_000);
+    clock.setRate(4);
+    expect(clock.now()).toBe(100);
+    clock.resume();
+    host.advance(50);
+    expect(clock.now()).toBe(300);
+  });
 });
 
 describe('KERNEL32 时间结构写回（RA2 增补，原 clockSmoke）', () => {

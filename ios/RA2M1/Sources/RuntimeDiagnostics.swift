@@ -81,10 +81,20 @@ enum RuntimeHostBridge {
             }),
             touch: (record) => send(Object.assign({ kind: 'touch' }, record || {})),
             metrics: (record) => send(Object.assign({ kind: 'metrics' }, record || {})),
-            event: (event) => send({ kind: 'event', event: clip(event, 80) })
+            event: (event) => send({ kind: 'event', event: clip(event, 80) }),
+            lifecycle: (phase, nativeTimestampMs) => {
+              if (phase !== 'background' && phase !== 'foreground') return;
+              window.dispatchEvent(new CustomEvent('ra2-native-lifecycle', {
+                detail: { phase, nativeTimestampMs: Number(nativeTimestampMs) }
+              }));
+              api.metrics({ event: 'lifecycle', lifecyclePhase: `native-${phase}`, nativeTimestampMs });
+            }
           });
           Object.defineProperty(window, '__RA2NativeDiagnostics', {
             value: api, enumerable: false, configurable: false, writable: false
+          });
+          Object.defineProperty(window, '__RA2NativeLifecycle', {
+            value: api.lifecycle, enumerable: false, configurable: false, writable: false
           });
           window.addEventListener('error', (event) => {
             const error = event && event.error;
@@ -245,12 +255,23 @@ final class RuntimeDiagnosticsLog {
         for key in ["x", "y", "deltaX", "deltaY", "translationX", "translationY", "viewportWidth", "viewportHeight", "devicePixelRatio", "pressure"] {
             if let number = Self.boundedNumber(body[key], range: -32768...32768) { record[key] = number }
         }
+        for key in ["startX", "startY", "endX", "endY", "logicalStartX", "logicalStartY", "logicalEndX", "logicalEndY", "mouseDeltaX", "mouseDeltaY", "cameraDeltaX", "cameraDeltaY", "mouseFlags", "mouseFlagsDuringGesture", "modifiers"] {
+            if let number = Self.boundedNumber(body[key], range: -32768...32768) { record[key] = number }
+        }
+        if let sequence = body["wmSequence"] as? String,
+           sequence.range(of: "^(WM_MOUSEMOVE|WM_LBUTTONDOWN|WM_LBUTTONUP|WM_RBUTTONDOWN|WM_RBUTTONUP|WM_CANCELMODE)(>(WM_MOUSEMOVE|WM_LBUTTONDOWN|WM_LBUTTONUP|WM_RBUTTONDOWN|WM_RBUTTONUP|WM_CANCELMODE)){0,31}$", options: .regularExpression) != nil {
+            record["wmSequence"] = sequence
+        }
+        if let flags = body["mouseFlagsSequence"] as? String,
+           flags.range(of: "^(0|1|2|3)(>(0|1|2|3)){0,31}$", options: .regularExpression) != nil {
+            record["mouseFlagsSequence"] = flags
+        }
         if let orientation = body["orientation"] as? String,
            ["portrait", "portraitUpsideDown", "landscapeLeft", "landscapeRight", "unknown"].contains(orientation) {
             record["orientation"] = orientation
         }
         if let gesture = body["gesture"] as? String,
-           ["pending", "drag", "longPress", "twoPending", "twoDrag", "singleTap", "twoTap", "cancelled", "released", "joystick", "touchControlsShown", "touchControlsHidden"].contains(gesture) {
+           ["pending", "drag", "selectDrag", "selectionReplaced", "emptySelection", "longPress", "twoPending", "twoDrag", "twoPan", "singleTap", "twoTap", "cancelled", "released", "joystick", "touchControlsShown", "touchControlsHidden"].contains(gesture) {
             record["gesture"] = gesture
         }
         if let mode = body["mode"] as? String,
@@ -275,10 +296,34 @@ final class RuntimeDiagnosticsLog {
         lock.lock()
         defer { lock.unlock() }
         let keys = ["viewportWidth", "viewportHeight", "screenWidth", "screenHeight", "devicePixelRatio",
-                    "safeAreaTop", "safeAreaRight", "safeAreaBottom", "safeAreaLeft"]
+                    "safeAreaTop", "safeAreaRight", "safeAreaBottom", "safeAreaLeft", "nativeTimestampMs",
+                    "workerObservedAtEpochMs", "workerResponseMs", "guestLogicFrame", "guestLogicFrameDelta",
+                    "guestTimeMs", "guestTimeDeltaMs", "guestClockPaused", "workerRunning", "workerResponsive",
+                    "hypercallPending", "pendingFileReads", "pendingFileWrites", "rangePrefetchPending",
+                    "rangePrefetchSpeculating", "lifecycleCycles", "flushOk", "safeToResume",
+                    "audioContextTimeSeconds", "audioContextDeltaSeconds", "audioContextSampleRateHz", "audioPlayingBuffers", "audioSourceCount",
+                    "audioStreamCount", "audioWorkletCount", "audioStaleWorklets", "audioStaleWorkletsDetected", "audioLiveProcessorCount", "audioSampleRateHz",
+                    "audioFrequencyHz", "audioChannels", "audioBitsPerSample", "audioBlockAlign", "audioFormatCount",
+                    "audioSourceStartCount", "audioStreamStartCount", "audioWorkletStartCount", "audioDynamicStreamWrites", "audioDynamicStreamWriteRateHz",
+                    "audioBufferCreateCount", "audioBufferDuplicateCount", "audioBufferCursorFrames", "audioBufferTotalFrames",
+                    "audioBufferFrequencyHz", "audioBufferSampleRateHz", "audioBufferChannels", "audioBufferBitsPerSample",
+                    "audioBufferWriteCount", "audioBufferWriteAgeMs", "audioBufferFrequencyChanges",
+                    "audioActiveBufferWriteCount", "audioMaxActiveBufferWriteAgeMs", "audioActiveBufferFrequencyChanges",
+                    "audioMinActiveFrequencyHz", "audioMaxActiveFrequencyHz",
+                    "audioBufferPlaying", "audioBufferLooping", "audioUnlockResult", "binkSetSoundSystemCalls", "binkOpenDirectSoundCalls",
+                    "binkOpenCalls", "binkDoFrameCalls", "binkNextFrameCalls", "binkWaitCalls", "directSoundCreateBufferCalls",
+                    "directSoundLockCalls", "directSoundUnlockCalls", "directSoundPlayCalls", "directSoundSetFrequencyCalls", "winmmTimeGetTimeCalls",
+                    "guestWidth", "guestHeight", "canvasCssWidth", "canvasCssHeight",
+                    "canvasBackingWidth", "canvasBackingHeight", "fps", "firstGestureTimestampMs"]
         var fields: [String] = []
         for key in keys {
-            if let value = Self.boundedNumber(body[key], range: 0...12000) { fields.append("\(key)=\(value)") }
+            if let value = Self.boundedNumber(body[key], range: 0...10_000_000_000_000) { fields.append("\(key)=\(value)") }
+        }
+        for key in ["event", "lifecyclePhase", "documentVisibility", "audioContextState", "rendererBackend", "workerPhase", "recoveryReason"] {
+            if let value = body[key] as? String,
+               value.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil {
+                fields.append("\(key)=\(value)")
+            }
         }
         if let orientation = body["orientation"] as? String,
            ["portrait", "portraitUpsideDown", "landscapeLeft", "landscapeRight", "unknown"].contains(orientation) {

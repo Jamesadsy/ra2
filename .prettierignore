@@ -4,5 +4,8 @@ public/
 **/vendor/
 **/LICENSE*
 
+# Windows checks out the CLAUDE.md link as a path-text stub; do not rewrite its target with a newline.
+CLAUDE.md
+
 # Preserve copied third-party skill originals.
 .agents/skills/

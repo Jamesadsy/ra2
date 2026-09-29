@@ -9,10 +9,13 @@ import { UiErrorBoundary } from './ui/shared/components/UiErrorBoundary';
 import { showEdgeMouseNotice } from './ui/pages/game/components/edgeMouseNotice';
 import { isEa108IosHost } from './platform/browser/ea108MobileHost';
 import { installNativeTouchDiagnostics, reportNativeRuntimeEvent } from './platform/browser/nativeDiagnostics';
+import { controlsCollapsed } from './ui/pages/game/state/uiState';
 
 document.documentElement.lang = uiLocale;
 document.title = uiLocale === 'en' ? 'Red Alert 2 in your browser' : '红色警戒2 网页版';
 if (isEa108IosHost()) {
+  document.documentElement.dataset.hostPlatform = 'ios';
+  controlsCollapsed.set(true);
   reportNativeRuntimeEvent('web bootstrap entry executed');
   installNativeTouchDiagnostics();
 }

@@ -55,6 +55,25 @@ try {
             await wait(() => created === before + 1 && latest.messages > 0 && latest.count === 1);
             processorCounts.push(latest.count);
             if(!sink.getState('music')?.playing) throw new Error('Stream stopped during playback');
+            if(session === 0 && cycle === 0) {
+              const beforeLifecycle = sink.getLifecycleSnapshot();
+              if(beforeLifecycle.workletCount !== 1 || beforeLifecycle.playingBuffers !== 1) {
+                throw new Error('Expected one live worklet stream before lifecycle suspend');
+              }
+              const suspended = await sink.suspendForLifecycle();
+              if(context.state !== 'suspended' || suspended.playingBuffers !== 1 || suspended.workletCount !== 0) {
+                throw new Error('Lifecycle suspend did not checkpoint playback and release the old worklet');
+              }
+              const beforeResume = created;
+              const resumed = await sink.resumeForLifecycle();
+              if(resumed.unlockResult !== true) throw new Error('AudioContext did not resume');
+              await wait(() => created === beforeResume + 1 && latest.messages > 0 && latest.count === 1);
+              const afterLifecycle = sink.getLifecycleSnapshot();
+              if(afterLifecycle.contextState !== 'running' || afterLifecycle.playingBuffers !== 1 || afterLifecycle.workletCount !== 1) {
+                throw new Error('Lifecycle resume did not rebuild the retained live worklet stream');
+              }
+              if(!sink.getState('music')?.playing) throw new Error('Playback state was lost over lifecycle resume');
+            }
             if(cycle % 2 === 0) sink.stop('music');
             if(!sink.releaseBuffer('music') || sink.getState('music') !== null) throw new Error('Buffer was retained');
             latest.detach();

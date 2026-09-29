@@ -8,11 +8,18 @@ import {
   patchGameResolutionIni,
   withGameResolutionOverride,
 } from '../../src/games/resolution';
+import { initialGameResolution } from '../../src/ui/pages/game/vmPageResolution';
 
 const encode = (text: string): Uint8Array => Uint8Array.from(text, (character) => character.charCodeAt(0));
 const decode = (bytes: Uint8Array): string => String.fromCharCode(...bytes);
 
 describe('RA2/YR 分辨率 INI 内存覆盖', () => {
+  it('iPhone 默认选择可读的 1280×720，保存值优先且桌面保留原 INI', () => {
+    expect(initialGameResolution(null, true)).toEqual({ width: 1280, height: 720 });
+    expect(initialGameResolution({ width: 1600, height: 900 }, true)).toEqual({ width: 1600, height: 900 });
+    expect(initialGameResolution(null, false)).toBeNull();
+  });
+
   it('只修改 [Video] 的三个键并保留 CRLF 与其他 section', () => {
     const original = encode(
       '[Options]\r\nScreenWidth=123\r\n\r\n[Video]\r\nVideoBackBuffer=no\r\n' +

@@ -33,6 +33,10 @@ export function reportNativeRuntimeEvent(event: string): void {
   nativeBridge()?.event(event);
 }
 
+export function reportNativeRuntimeMetrics(record: NativeDiagnosticRecord): void {
+  nativeBridge()?.metrics(record);
+}
+
 export function reportNativeRuntimeError(event: string, error: unknown): void {
   const value = error instanceof Error ? error : new Error(String(error));
   nativeBridge()?.error(event, value.message, value.stack ?? '');

@@ -8,6 +8,7 @@ export class ScaledClock {
   private rate = 1;
   private hostAnchor: number;
   private guestAnchor = 0;
+  private paused = false;
   private readonly wallAnchor: number;
   private readonly readHostTime: () => number;
 
@@ -19,8 +20,32 @@ export class ScaledClock {
   }
 
   now(): number {
+    if (this.paused) return this.guestAnchor;
     const hostNow = this.readHostTime();
     return this.guestAnchor + (hostNow - this.hostAnchor) * this.rate;
+  }
+
+  /** Freeze guest timer semantics while the native app is backgrounded. */
+  pause(): number {
+    if (!this.paused) {
+      this.guestAnchor = this.now();
+      this.hostAnchor = this.readHostTime();
+      this.paused = true;
+    }
+    return this.guestAnchor;
+  }
+
+  /** Resume at the same guest time; wall-clock time may have advanced independently. */
+  resume(): number {
+    if (this.paused) {
+      this.hostAnchor = this.readHostTime();
+      this.paused = false;
+    }
+    return this.now();
+  }
+
+  isPaused(): boolean {
+    return this.paused;
   }
 
   getRate(): number {
@@ -35,7 +60,7 @@ export class ScaledClock {
   setRate(requested: number): number {
     const next = normalizeGameClockRate(requested);
     const hostNow = this.readHostTime();
-    this.guestAnchor += (hostNow - this.hostAnchor) * this.rate;
+    if (!this.paused) this.guestAnchor += (hostNow - this.hostAnchor) * this.rate;
     this.hostAnchor = hostNow;
     this.rate = next;
     return next;

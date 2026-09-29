@@ -37,12 +37,14 @@ import { type GameSource } from '../../../games/source';
 import { clearCachedGameFiles, loadCustomMapFiles } from '../../../adapter/cachedGameFiles';
 import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
-import { loadStoredResolution } from './vmPageResolution';
+import { initialGameResolution, loadStoredResolution } from './vmPageResolution';
 import type { GameResolution } from '../../../games/resolution';
 import { isEa108IosHost, loadEa108IosOwnerGameSource } from '../../../platform/browser/ea108MobileHost';
+import { installRuntimeLifecycleCoordinator } from '../../../adapter/runtimeLifecycleCoordinator';
 import {
   reportNativeRuntimeError,
   reportNativeRuntimeEvent,
+  reportNativeRuntimeMetrics,
   reportNativeRuntimePhase,
   reportNativeTouch,
 } from '../../../platform/browser/nativeDiagnostics';
@@ -51,6 +53,8 @@ let activeVm: VmShell | null = null;
 const pageController = new VmSessionController();
 let activeKeyHandler: ((event: KeyboardEvent) => void) | null = null;
 let activeInputCleanup: (() => void) | null = null;
+let activeInputRelease: (() => void) | null = null;
+let activeLifecycleCleanup: (() => void) | null = null;
 let activeToolbarCleanup: (() => void) | null = null;
 let activeResourceCleanup: (() => void) | null = null;
 let activeNetworkCleanup: (() => void) | null = null;
@@ -64,10 +68,14 @@ let refitActiveCanvas: (frameWidth?: number, frameHeight?: number) => void = () 
 let canvasFitInstalled = false;
 let activeFitCleanup: (() => void) | null = null;
 let nativeFirstFrameAcknowledged = false;
+let presentationMetricsStartedAt = 0;
+let presentationFramesSinceMetrics = 0;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
   nativeFirstFrameAcknowledged = false;
+  presentationMetricsStartedAt = performance.now();
+  presentationFramesSinceMetrics = 0;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
   activeRendererCleanup?.();
   activeRendererCleanup = null;
@@ -148,6 +156,38 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     targetSize: () => ({ width: canvas.width, height: canvas.height }),
     transform: (frame) => effects.transform(frame),
     presented: () => {
+      presentationFramesSinceMetrics++;
+      const metricsNow = performance.now();
+      if (isEa108IosHost() && metricsNow - presentationMetricsStartedAt >= 2_000) {
+        const rect = canvas.getBoundingClientRect();
+        reportNativeRuntimeMetrics({
+          event: 'presentation',
+          nativeTimestampMs: Date.now(),
+          guestWidth: gameFrameWidth,
+          guestHeight: gameFrameHeight,
+          canvasCssWidth: rect.width,
+          canvasCssHeight: rect.height,
+          canvasBackingWidth: canvas.width,
+          canvasBackingHeight: canvas.height,
+          devicePixelRatio: window.devicePixelRatio,
+          rendererBackend: frameRenderer.backend,
+          fps: (presentationFramesSinceMetrics * 1_000) / (metricsNow - presentationMetricsStartedAt),
+          binkSetSoundSystemCalls: callHistogram.get('BINKW32.DLL!_BinkSetSoundSystem@8') ?? 0,
+          binkOpenDirectSoundCalls: callHistogram.get('BINKW32.DLL!_BinkOpenDirectSound@4') ?? 0,
+          binkOpenCalls: callHistogram.get('BINKW32.DLL!_BinkOpen@8') ?? 0,
+          binkDoFrameCalls: callHistogram.get('BINKW32.DLL!_BinkDoFrame@4') ?? 0,
+          binkNextFrameCalls: callHistogram.get('BINKW32.DLL!_BinkNextFrame@4') ?? 0,
+          binkWaitCalls: callHistogram.get('BINKW32.DLL!_BinkWait@4') ?? 0,
+          directSoundCreateBufferCalls: callHistogram.get('DSOUND.COM!IDirectSound.CreateSoundBuffer') ?? 0,
+          directSoundLockCalls: callHistogram.get('DSOUND.COM!IDirectSoundBuffer.Lock') ?? 0,
+          directSoundUnlockCalls: callHistogram.get('DSOUND.COM!IDirectSoundBuffer.Unlock') ?? 0,
+          directSoundPlayCalls: callHistogram.get('DSOUND.COM!IDirectSoundBuffer.Play') ?? 0,
+          directSoundSetFrequencyCalls: callHistogram.get('DSOUND.COM!IDirectSoundBuffer.SetFrequency') ?? 0,
+          winmmTimeGetTimeCalls: callHistogram.get('WINMM.DLL!timeGetTime') ?? 0,
+        });
+        presentationMetricsStartedAt = metricsNow;
+        presentationFramesSinceMetrics = 0;
+      }
       if (!nativeFirstFrameAcknowledged) {
         nativeFirstFrameAcknowledged = true;
         reportNativeRuntimePhase('firstGameFrameObserved');
@@ -370,7 +410,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const networkIndicator = networkStatus;
   activeNetworkCleanup = () => networkIndicator.set(null);
   selectedGameId = gameSource.game.id;
-  requestedResolution = loadStoredResolution(selectedGameId);
+  requestedResolution = initialGameResolution(loadStoredResolution(selectedGameId), isEa108IosHost());
   toolbar.setResolution(requestedResolution);
   toolbar.setGameTitle(gameSource.game.title);
   mainPanel.set(null);
@@ -404,6 +444,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
 
   const releaseRuntime = async () => {
     effects.stop();
+    activeLifecycleCleanup?.();
+    activeLifecycleCleanup = null;
     activeNetworkCleanup?.();
     activeNetworkCleanup = null;
     activeResourceCleanup?.();
@@ -413,6 +455,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     helpVisible.set(false);
     activeInputCleanup?.();
     activeInputCleanup = null;
+    activeInputRelease = null;
     if (activeKeyHandler) window.removeEventListener('keydown', activeKeyHandler);
     activeKeyHandler = null;
     debugVisible.set(false);
@@ -461,10 +504,12 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     }));
     const pointerProbeTimer = debugAutoOpen ? window.setInterval(refreshPointerProbe, 250) : null;
     adaptInputResolution = installedInput.adaptResolution;
+    activeInputRelease = installedInput.release;
     const cleanupTouch = installAdaptiveTouchControls(canvas, startedVm);
     const cleanupWake = installWakeLock();
     activeInputCleanup = () => {
       adaptInputResolution = null;
+      if (activeInputRelease === installedInput.release) activeInputRelease = null;
       installedInput.cleanup();
       if (pointerProbeTimer !== null) window.clearInterval(pointerProbeTimer);
       cleanupTouch();
@@ -563,6 +608,14 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   vm.setGameClockRate(requestedClockRate);
   vm.setMasterVolume(requestedVolume);
   activeVm = vm;
+  if (isEa108IosHost()) {
+    activeLifecycleCleanup?.();
+    activeLifecycleCleanup = installRuntimeLifecycleCoordinator(
+      vm,
+      () => activeInputRelease?.(),
+      (reason) => showLifecycleRecoverySurface(reason),
+    );
+  }
   toolbar.setMapsAvailable(status.phase === 'running');
   // Overlay RA2's Win32 hardware cursor as a small independent framebuffer texture; it remains visible after Pointer Lock
   // hides the system cursor and moves without retransmitting the whole frame. At screen edges, clamp the logical
@@ -578,6 +631,41 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     // Runtime already rendered a readable error through onStatus; prevent an unhandled rejection from the dynamic entry point here.
     console.error(t('[VM] 启动失败'), error);
   }
+}
+
+function showLifecycleRecoverySurface(reason: string): void {
+  activeInputRelease?.();
+  document.getElementById('ra2-lifecycle-recovery')?.remove();
+  const surface = document.createElement('div');
+  surface.id = 'ra2-lifecycle-recovery';
+  surface.setAttribute('role', 'alertdialog');
+  surface.setAttribute('aria-modal', 'true');
+  surface.setAttribute('aria-labelledby', 'ra2-lifecycle-recovery-title');
+  surface.style.cssText =
+    'position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:24px;background:rgba(5,8,10,.94);color:#d8d0b8;font:16px/1.5 Consolas,monospace;';
+  const panel = document.createElement('section');
+  panel.style.cssText =
+    'box-sizing:border-box;width:min(560px,100%);padding:24px;border:1px solid #806542;background:#111619;box-shadow:0 18px 70px #000;border-radius:4px;';
+  const title = document.createElement('h1');
+  title.id = 'ra2-lifecycle-recovery-title';
+  title.textContent = 'CnC RA2 needs to restart';
+  title.style.cssText = 'margin:0 0 12px;color:#e0ad4f;font-size:20px;';
+  const message = document.createElement('p');
+  message.textContent =
+    'The live game could not be resumed safely. Restarting returns to the RA2 start screen. User save and configuration data remains in the app when the last storage flush completed.';
+  const detail = document.createElement('p');
+  detail.textContent = `Recovery reason: ${reason.slice(0, 64)}`;
+  detail.style.cssText = 'color:#a9a28e;font-size:12px;';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'Restart CnC RA2';
+  button.style.cssText =
+    'min-height:44px;padding:0 18px;border:1px solid #be8242;border-radius:3px;background:#7d211d;color:#fff;font:700 14px Consolas,monospace;';
+  button.addEventListener('click', () => window.location.reload(), { once: true });
+  panel.append(title, message, detail, button);
+  surface.append(panel);
+  document.body.append(surface);
+  button.focus();
 }
 
 function readDebugRoute(): Array<[number, number]> {
@@ -633,10 +721,13 @@ export function stopVmPage(): void {
   activeResourceCleanup?.();
   activeResourceCleanup = null;
   activeVm = null;
+  activeLifecycleCleanup?.();
+  activeLifecycleCleanup = null;
   if (activeKeyHandler) window.removeEventListener('keydown', activeKeyHandler);
   activeKeyHandler = null;
   activeInputCleanup?.();
   activeInputCleanup = null;
+  activeInputRelease = null;
   activeToolbarCleanup?.();
   activeToolbarCleanup = null;
   activeRendererCleanup?.();

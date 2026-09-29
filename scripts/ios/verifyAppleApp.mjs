@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const base = process.env.ACCEPTED_BASE_SHA ?? '12dc7ec83224fa88d98e7d2086e80cc6a1d9e5e5';
-const expectedBranch = 'secondsun/ra2-m1-ios-065-case-insensitive-owner-files';
+const expectedBranch = 'secondsun/ra2-m1-ios-066-physical-polish';
 const [appPath, outputDirectory] = process.argv.slice(2).map((path) => resolve(path));
 if (!appPath || !outputDirectory) throw new Error('Usage: verifyAppleApp.mjs <RA2M1.app> <artifact-output-directory>');
 

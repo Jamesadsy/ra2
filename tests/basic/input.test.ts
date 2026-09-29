@@ -40,4 +40,10 @@ describe('锁定鼠标分辨率适配', () => {
     expect(rescaleLogicalPointer(799, 599, 800, 600, 1440, 900)).toEqual([1439, 899]);
     expect(rescaleLogicalPointer(799, 599, 800, 600, 320, 200)).toEqual([319, 199]);
   });
+
+  it('切换到/离开 iPhone 1280×720 guest frame 后仍映射正确', () => {
+    expect(rescaleLogicalPointer(400, 300, 800, 600, 1280, 720)).toEqual([640, 360]);
+    expect(rescaleLogicalPointer(640, 360, 1280, 720, 800, 600)).toEqual([400, 300]);
+    expect(rescaleLogicalPointer(1279, 719, 1280, 720, 1600, 900)).toEqual([1599, 899]);
+  });
 });

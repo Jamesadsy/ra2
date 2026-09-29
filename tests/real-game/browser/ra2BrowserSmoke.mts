@@ -20,6 +20,43 @@ const MAIN_SINGLE_PLAYER: readonly [number, number] = GAME_ID === 'yr' ? [1288, 
 const SINGLE_PLAYER_BACK: readonly [number, number] = GAME_ID === 'yr' ? [1288, 830] : [1034, 708];
 const SINGLE_PLAYER_CAMPAIGN: readonly [number, number] = GAME_ID === 'yr' ? [1288, 330] : [1034, 371];
 
+interface AudioProgressProbe {
+  contextState: string;
+  contextTimeSeconds: number | null;
+  contextSampleRateHz: number | null;
+  sourceStartCount: number;
+  streamStartCount: number;
+  workletStartCount: number;
+  dynamicStreamWrites: number;
+  bufferCreateCount: number;
+  bufferDuplicateCount: number;
+  buffers: Array<{
+    id: number;
+    byteLength: number;
+    positionBytes: number;
+    playing: boolean;
+    loop: boolean;
+    sampleRate: number;
+    channels: number;
+    bitsPerSample: number;
+    blockAlign: number;
+    frequency: number;
+    writeCount: number;
+    writeAgeMs: number | null;
+    frequencyChangeCount: number;
+    worklet: boolean;
+    scriptStream: boolean;
+    source: boolean;
+  }>;
+}
+
+async function readAudioProgress(page: Page): Promise<AudioProgressProbe | null> {
+  return page.evaluate(() => {
+    const probe = (window as Window & { __RA2AudioProgressProbe?: () => AudioProgressProbe }).__RA2AudioProgressProbe;
+    return probe?.() ?? null;
+  });
+}
+
 function serverReady(): Promise<boolean> {
   return new Promise((resolve) => {
     const req = request(ORIGIN, { rejectUnauthorized: false }, (response) => {
@@ -60,6 +97,23 @@ async function expectShellPage(page: Page, expected: string, timeout: number): P
     expected.toLowerCase(),
     { timeout },
   );
+}
+
+/** A private ten-file stage contains only RA2, so the shell auto-launches it instead of showing a game chooser. */
+async function chooseLocalGameIfPrompted(page: Page, canvas: Locator, gameIndex: number): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  const choices = page.locator('.detected-games button');
+  while (Date.now() < deadline) {
+    const count = await choices.count();
+    if (count > 0) {
+      assert(count > gameIndex, `本地游戏选择项不足：需要索引 ${gameIndex}，实际 ${count}`);
+      await choices.nth(gameIndex).click();
+      return;
+    }
+    if (((await canvas.getAttribute('data-shell-page')) ?? '').toLowerCase().includes('mainmenu')) return;
+    await page.waitForTimeout(100);
+  }
+  throw new Error('本地 RA2 资源既未显示游戏选择项，也未自动进入主菜单');
 }
 
 async function waitForQuietFileReads(page: Page, canvas: Locator): Promise<void> {
@@ -676,16 +730,13 @@ try {
   });
   page.on('crash', () => console.error(`❌ ${GAME_LABEL} Chromium renderer crashed`));
   await page.goto(`${ORIGIN}/?debug=1`, { waitUntil: 'domcontentloaded' });
+  const canvas = page.locator('#screen');
   if (!IOS_HOST_MODE) {
     // Local resources now require explicit selection; a fresh browser context has no IndexedDB import cache.
     await page.getByRole('button', { name: '开发测试', exact: true }).click();
-    await page
-      .locator('.detected-games button')
-      .nth(GAME_ID === 'ra2' ? 0 : 1)
-      .click();
+    await chooseLocalGameIfPrompted(page, canvas, GAME_ID === 'ra2' ? 0 : 1);
   }
 
-  const canvas = page.locator('#screen');
   const problem = page.locator('h3').filter({ hasText: /运行错误|接口待实现/ });
   await expectShellPage(page, 'mainmenu', 60_000);
   await waitForQuietFileReads(page, canvas);
@@ -828,6 +879,7 @@ try {
   );
   const battlefieldVideoBinkBefore = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
   const battlefieldVideoAudioBefore = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
+  const battlefieldAudioSnapshotBefore = await readAudioProgress(page);
   // YR keeps the shell/campaign briefing at 800x600 and reads RA2MD.INI to switch to the selected mode only on
   // entering the actual battlefield. Wait for the resolution change to avoid treating the briefing as a playable battlefield.
   await page.waitForFunction(
@@ -843,15 +895,106 @@ try {
   // The battlefield's top-right EVA/briefing window is a separate Bink instance; fullscreen cutscene audio assertions
   // cannot cover it. Observe its Close and DirectSound stream. It may Open before the battlefield is deemed
   // playable, so use the playback-ending Close increment as a stable lifecycle gate.
-  await page.waitForTimeout(8_000);
+  const battlefieldAudioSamples: Array<AudioProgressProbe | null> = [];
+  for (let sample = 0; sample < 32; sample++) {
+    battlefieldAudioSamples.push(await readAudioProgress(page));
+    await page.waitForTimeout(250);
+  }
   const battlefieldVideoBinkAfter = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
   const battlefieldVideoAudioAfter = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
+  const validAudioSamples = battlefieldAudioSamples.filter((sample): sample is AudioProgressProbe => sample !== null);
+  const audioWindowStart = validAudioSamples[0];
+  const audioWindowEnd = validAudioSamples.at(-1);
+  const audioClockDeltaSeconds =
+    audioWindowStart?.contextTimeSeconds !== null &&
+    audioWindowStart?.contextTimeSeconds !== undefined &&
+    audioWindowEnd?.contextTimeSeconds !== null &&
+    audioWindowEnd?.contextTimeSeconds !== undefined
+      ? audioWindowEnd.contextTimeSeconds - audioWindowStart.contextTimeSeconds
+      : 0;
+  const baselineBufferIds = new Set((battlefieldAudioSnapshotBefore?.buffers ?? []).map((buffer) => buffer.id));
+  const battlefieldBufferIds = new Set(
+    validAudioSamples.flatMap((sample) =>
+      sample.buffers.filter((buffer) => !baselineBufferIds.has(buffer.id)).map((buffer) => buffer.id),
+    ),
+  );
+  const advancingBattlefieldBuffers = [...battlefieldBufferIds].filter((id) => {
+    const positions = validAudioSamples.flatMap((sample) =>
+      sample.buffers.filter((buffer) => buffer.id === id && buffer.playing).map((buffer) => buffer.positionBytes),
+    );
+    return new Set(positions).size >= 4;
+  });
+  const activeBattlefieldBuffers = [...battlefieldBufferIds].flatMap(
+    (id) => validAudioSamples.at(-1)?.buffers.filter((buffer) => buffer.id === id && buffer.playing) ?? [],
+  );
+  const battlefieldFormats = [
+    ...new Map(
+      activeBattlefieldBuffers.map((buffer) => [
+        `${buffer.sampleRate}/${buffer.channels}/${buffer.bitsPerSample}/${buffer.frequency}`,
+        `${buffer.sampleRate}Hz ${buffer.channels}ch ${buffer.bitsPerSample}bit @${buffer.frequency}Hz`,
+      ]),
+    ).values(),
+  ];
+  const activeStreamBackends = activeBattlefieldBuffers.filter(
+    (buffer) => buffer.worklet || buffer.scriptStream,
+  ).length;
+  const firstBufferById = new Map((audioWindowStart?.buffers ?? []).map((buffer) => [buffer.id, buffer]));
+  const finalBufferById = new Map((audioWindowEnd?.buffers ?? []).map((buffer) => [buffer.id, buffer]));
+  const newBufferWriteDelta = [...battlefieldBufferIds].reduce((sum, id) => {
+    const first = firstBufferById.get(id);
+    const last = finalBufferById.get(id);
+    return sum + Math.max(0, (last?.writeCount ?? 0) - (first?.writeCount ?? 0));
+  }, 0);
+  const newBufferFrequencyChanges = [...battlefieldBufferIds].reduce((sum, id) => {
+    const first = firstBufferById.get(id);
+    const last = finalBufferById.get(id);
+    return sum + Math.max(0, (last?.frequencyChangeCount ?? 0) - (first?.frequencyChangeCount ?? 0));
+  }, 0);
+  const activeFrequencyValues = validAudioSamples.flatMap((sample) =>
+    sample.buffers
+      .filter((buffer) => battlefieldBufferIds.has(buffer.id) && buffer.playing)
+      .map((buffer) => buffer.frequency),
+  );
+  const maxActiveWriteAgeMs = Math.max(0, ...activeBattlefieldBuffers.map((buffer) => buffer.writeAgeMs ?? 0));
+  const singleBackendPerBuffer = activeBattlefieldBuffers.every(
+    (buffer) => Number(buffer.worklet) + Number(buffer.scriptStream) + Number(buffer.source) <= 1,
+  );
+  const baselineCreateCount = battlefieldAudioSnapshotBefore?.bufferCreateCount ?? 0;
+  const finalCreateCount = audioWindowEnd?.bufferCreateCount ?? baselineCreateCount;
+  const baselineWorkletStarts = battlefieldAudioSnapshotBefore?.workletStartCount ?? 0;
+  const finalWorkletStarts = audioWindowEnd?.workletStartCount ?? baselineWorkletStarts;
+  const setFrequencyCallsDelta =
+    (battlefieldVideoAudioAfter['DSOUND.COM!IDirectSoundBuffer.SetFrequency'] ?? 0) -
+    (battlefieldVideoAudioBefore['DSOUND.COM!IDirectSoundBuffer.SetFrequency'] ?? 0);
   // This corner presentation is a known non-blocking residual. It may remain open beyond this probe window;
   // M1 requires the original campaign briefing and usable audio, both checked independently above/below.
   assert(
     (battlefieldVideoAudioAfter['DSOUND.COM!IDirectSoundBuffer.Lock'] ?? 0) >
       (battlefieldVideoAudioBefore['DSOUND.COM!IDirectSoundBuffer.Lock'] ?? 0),
     `${GAME_LABEL} 战场右上角过场期间 DirectSound PCM 没有持续写入`,
+  );
+  assert.equal(audioWindowEnd?.contextState, 'running', '战场通讯视频播放时 AudioContext 未运行');
+  assert(audioClockDeltaSeconds >= 5.5, `战场通讯视频探针窗口音频时钟只前进 ${audioClockDeltaSeconds.toFixed(2)}s`);
+  assert(finalCreateCount > baselineCreateCount, '战场通讯视频未创建 DirectSound PCM buffer');
+  assert(battlefieldBufferIds.size > 0, '战场通讯视频窗口没有新建 WebAudio PCM buffer');
+  assert(advancingBattlefieldBuffers.length > 0, '战场通讯视频新增 PCM buffer 游标没有推进');
+  assert(activeStreamBackends > 0, '战场通讯视频没有活动的 WebAudio PCM stream/worklet');
+  assert(singleBackendPerBuffer, '同一个战场通讯 PCM buffer 同时连接多个播放后端');
+  assert(
+    activeBattlefieldBuffers.every(
+      (buffer) =>
+        buffer.sampleRate > 0 &&
+        buffer.frequency > 0 &&
+        (buffer.channels === 1 || buffer.channels === 2) &&
+        [8, 16, 24, 32].includes(buffer.bitsPerSample) &&
+        buffer.blockAlign === (buffer.bitsPerSample / 8) * buffer.channels,
+    ),
+    '战场通讯视频 PCM format/frequency 无效',
+  );
+  assert(
+    (audioWindowEnd?.bufferDuplicateCount ?? 0) <=
+      (battlefieldAudioSnapshotBefore?.bufferDuplicateCount ?? 0) + Math.max(1, battlefieldBufferIds.size),
+    '战场通讯视频 DirectSound buffer duplicate creation exceeded its new-buffer count',
   );
   console.log(
     `🔬 战场右上角过场：BinkOpen=${battlefieldVideoBinkBefore['BINKW32.DLL!_BinkOpen@8'] ?? 0}` +
@@ -863,7 +1006,15 @@ try {
       `Play=${battlefieldVideoAudioBefore['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0}` +
       `→${battlefieldVideoAudioAfter['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0}，` +
       `Lock=${battlefieldVideoAudioBefore['DSOUND.COM!IDirectSoundBuffer.Lock'] ?? 0}` +
-      `→${battlefieldVideoAudioAfter['DSOUND.COM!IDirectSoundBuffer.Lock'] ?? 0}`,
+      `→${battlefieldVideoAudioAfter['DSOUND.COM!IDirectSoundBuffer.Lock'] ?? 0}，` +
+      `AudioContext=${audioWindowEnd?.contextState ?? 'unavailable'} Δt=${audioClockDeltaSeconds.toFixed(2)}s，` +
+      `PCM buffer=${battlefieldBufferIds.size} active=${activeBattlefieldBuffers.length} cursor=${advancingBattlefieldBuffers.length}，` +
+      `format=${battlefieldFormats.join(',') || 'none'} frequency=${activeFrequencyValues.length ? `${Math.min(...activeFrequencyValues)}-${Math.max(...activeFrequencyValues)}Hz` : 'none'}，` +
+      `stream/worklet=${activeStreamBackends} write=${newBufferWriteDelta}/${audioClockDeltaSeconds.toFixed(2)}s ` +
+      `staleWriteMax=${maxActiveWriteAgeMs.toFixed(0)}ms freqChanges=${newBufferFrequencyChanges}，` +
+      `sourceStarts=${audioWindowEnd?.sourceStartCount ?? 0} streamStarts=${audioWindowEnd?.streamStartCount ?? 0} ` +
+      `workletStarts=${finalWorkletStarts - baselineWorkletStarts} ` +
+      `SetFrequencyΔ=${setFrequencyCallsDelta} duplicateΔ=${(audioWindowEnd?.bufferDuplicateCount ?? 0) - (battlefieldAudioSnapshotBefore?.bufferDuplicateCount ?? 0)}`,
   );
   const battleFrame = Number((await canvas.getAttribute('data-vm-frame')) ?? 0);
   const battleResolution = (await canvas.getAttribute('data-vm-resolution')) ?? '800x600';
@@ -965,10 +1116,7 @@ try {
   // The development directory is not a player archive cache; explicitly select development resources again after reload.
   if (!IOS_HOST_MODE) {
     await page.getByRole('button', { name: '开发测试', exact: true }).click();
-    await page
-      .locator('.detected-games button')
-      .nth(GAME_ID === 'ra2' ? 0 : 1)
-      .click();
+    await chooseLocalGameIfPrompted(page, canvas, GAME_ID === 'ra2' ? 0 : 1);
   }
   await expectShellPage(page, 'mainmenu', 60_000);
   assert.equal(

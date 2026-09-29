@@ -18,6 +18,7 @@ import { VmCore, type VmAudioSink, type VmCorePlatform } from './vmCore';
 import type { MainToWorkerMessage, VmInitConfig, WorkerToMainMessage } from './vmProtocol';
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmPointerState } from './vmShell';
+import type { VmLifecycleSnapshot } from './vmLifecycle';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 import type { VmFrame } from '../vm86/win32';
@@ -30,6 +31,9 @@ export interface VmWorkerCore {
   start(): Promise<void>;
   stop(): Promise<void>;
   flushFiles(): Promise<void>;
+  pauseForLifecycle?(): Promise<VmLifecycleSnapshot>;
+  resumeForLifecycle?(): Promise<VmLifecycleSnapshot>;
+  getLifecycleSnapshot?(): VmLifecycleSnapshot;
   postMessage(message: number, wParam?: number, lParam?: number): void;
   setKeyState(virtualKey: number, down: boolean): void;
   setCursorPosition(x: number, y: number): void;
@@ -154,6 +158,7 @@ function requestIdOf(message: MainToWorkerMessage): number | undefined {
     case 'mem-record-stop':
     case 'flush':
     case 'attach-maps':
+    case 'lifecycle':
       return message.requestId;
     case 'control':
       return message.requestId;
@@ -293,6 +298,28 @@ export class VmWorkerController {
           await this.core?.flushFiles();
           this.post({ type: 'flush-done', requestId: message.requestId });
           break;
+        case 'lifecycle': {
+          let value: VmLifecycleSnapshot;
+          if (!this.core) throw new Error('VM 尚未 init');
+          if (message.action === 'pause') {
+            this.frameScheduleGeneration++;
+            this.inFlightFrameId = 0;
+            this.pendingFrameEmit = null;
+            value =
+              (await this.core.pauseForLifecycle?.()) ??
+              this.core.getLifecycleSnapshot?.() ??
+              unavailableLifecycleSnapshot();
+          } else if (message.action === 'resume') {
+            value =
+              (await this.core.resumeForLifecycle?.()) ??
+              this.core.getLifecycleSnapshot?.() ??
+              unavailableLifecycleSnapshot();
+          } else {
+            value = this.core.getLifecycleSnapshot?.() ?? unavailableLifecycleSnapshot();
+          }
+          this.post({ type: 'lifecycle-reply', action: message.action, requestId: message.requestId, value });
+          break;
+        }
         case 'attach-maps': {
           if (!this.core || !this.sourceTemplate) throw new Error('VM 尚未初始化');
           const { provider, result } = await prepareDynamicMaps(
@@ -517,6 +544,26 @@ export class VmWorkerController {
 export function createVmWorkerController(dependencies: VmWorkerControllerDependencies): VmWorkerController {
   const { postMessage, ...rest } = dependencies;
   return new VmWorkerController(postMessage, rest);
+}
+
+function unavailableLifecycleSnapshot(): VmLifecycleSnapshot {
+  return {
+    observedAtEpochMs: Date.now(),
+    phase: 'error',
+    guestLogicFrame: 0,
+    guestTimeMs: null,
+    guestClockPaused: false,
+    workerRunning: false,
+    hypercallPending: false,
+    pendingFileReads: 0,
+    pendingFileWrites: 0,
+    rangePrefetchPending: false,
+    rangePrefetchSpeculating: false,
+    lifecycleCycles: 0,
+    flushOk: null,
+    safeToResume: false,
+    recoveryReason: 'runtime-unavailable',
+  };
 }
 
 export function installVmWorker(

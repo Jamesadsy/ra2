@@ -91,4 +91,26 @@ describe('canvas 等比适配', () => {
     expect(result!.backingWidth).toBeGreaterThanOrEqual(360);
     expect(result!.backingHeight).toBeGreaterThanOrEqual(225);
   });
+
+  it('iPhone DPR 3 下 720p、900p、1080p 都保持 16:9、安全适配且 backing 不超过 2×', () => {
+    for (const { width, height } of [
+      { width: 1280, height: 720 },
+      { width: 1600, height: 900 },
+      { width: 1920, height: 1080 },
+    ]) {
+      const result = calculateCanvasFit({
+        stageWidth: 844,
+        stageHeight: 390,
+        frameWidth: width,
+        frameHeight: height,
+        devicePixelRatio: 3,
+      });
+      expect(result).not.toBeNull();
+      expect(result!.cssWidth).toBeLessThanOrEqual(844);
+      expect(result!.cssHeight).toBeLessThanOrEqual(390);
+      expect(result!.cssWidth / result!.cssHeight).toBeCloseTo(16 / 9, 3);
+      expect(result!.backingWidth / width).toBeLessThanOrEqual(2);
+      expect(result!.backingHeight / height).toBeLessThanOrEqual(2);
+    }
+  });
 });

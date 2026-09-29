@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
+import type { VmLifecycleReport } from '../../src/adapter/vmLifecycle';
 import { startSessionRuntime } from '../../src/app/session/startSessionRuntime';
 
 function shell(): VmShell {
@@ -8,6 +9,11 @@ function shell(): VmShell {
     getDiagnostics: async () => {
       throw new Error('No diagnostic capture in startup tests');
     },
+    lifecycle: async (action) => ({
+      action,
+      worker: {} as VmLifecycleReport['worker'],
+      audio: {} as VmLifecycleReport['audio'],
+    }),
     start: async () => {},
     stop: async () => {},
     flushFiles: async () => {},

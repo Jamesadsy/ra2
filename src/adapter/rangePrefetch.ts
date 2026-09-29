@@ -11,6 +11,10 @@ export class RangePrefetch {
     length: number;
     bytes: Promise<Uint8Array | null>;
   } | null = null;
+
+  snapshot(): { pending: boolean; speculating: boolean } {
+    return { pending: this.next !== null, speculating: this.speculating };
+  }
   clear(): void {
     this.generation++;
     this.next = null;

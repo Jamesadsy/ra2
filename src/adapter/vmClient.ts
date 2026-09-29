@@ -10,6 +10,7 @@ import {
   type VmInitConfig,
   type WorkerToMainMessage,
 } from './vmProtocol';
+import type { VmLifecycleAction, VmLifecycleReport, VmLifecycleSnapshot } from './vmLifecycle';
 import type { VmAttachResult, VmPointerState, VmShell } from './vmShell';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
@@ -75,7 +76,7 @@ export class WorkerVmClient implements VmShell {
   private resolveProbe: (() => void) | null = null;
   private rejectProbe: ((reason: Error) => void) | null = null;
   private probeTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
-  private lifecycle: 'active' | 'fatal' | 'destroying' | 'destroyed' = 'active';
+  private lifecycleState: 'active' | 'fatal' | 'destroying' | 'destroyed' = 'active';
   private fatalReason: Error | null = null;
   private destroyPromise: Promise<void> | null = null;
   private probeOk = false;
@@ -135,6 +136,38 @@ export class WorkerVmClient implements VmShell {
 
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {
     return this.request((requestId) => ({ type: 'diagnostics', action, requestId }));
+  }
+
+  async lifecycle(action: VmLifecycleAction | 'audio-unlock'): Promise<VmLifecycleReport> {
+    if (action === 'pause') {
+      const worker = await this.request<VmLifecycleSnapshot>((requestId) => ({ type: 'lifecycle', action, requestId }));
+      const audio = await this.audio.suspendForLifecycle();
+      return { action, worker, audio };
+    }
+    if (action === 'resume') {
+      const worker = await this.request<VmLifecycleSnapshot>((requestId) => ({ type: 'lifecycle', action, requestId }));
+      const audio = worker.safeToResume ? await this.audio.resumeForLifecycle() : this.audio.getLifecycleSnapshot();
+      return { action, worker, audio };
+    }
+    if (action === 'audio-unlock') {
+      const [worker, unlockResult] = await Promise.all([
+        this.request<VmLifecycleSnapshot>(
+          (requestId) => ({ type: 'lifecycle', action: 'probe', requestId }),
+          undefined,
+          false,
+          3_000,
+        ),
+        this.audio.unlock(),
+      ]);
+      return { action, worker, audio: this.audio.getLifecycleSnapshot(unlockResult) };
+    }
+    const worker = await this.request<VmLifecycleSnapshot>(
+      (requestId) => ({ type: 'lifecycle', action, requestId }),
+      undefined,
+      false,
+      3_000,
+    );
+    return { action, worker, audio: this.audio.getLifecycleSnapshot() };
   }
 
   async start(): Promise<void> {
@@ -224,14 +257,14 @@ export class WorkerVmClient implements VmShell {
 
   destroy(): Promise<void> {
     if (this.destroyPromise) return this.destroyPromise;
-    const flushBeforeTerminate = this.lifecycle === 'active' && this.workerReady();
-    this.lifecycle = 'destroying';
+    const flushBeforeTerminate = this.lifecycleState === 'active' && this.workerReady();
+    this.lifecycleState = 'destroying';
     this.destroyPromise = this.finalizeDestroy(flushBeforeTerminate);
     return this.destroyPromise;
   }
 
   private workerReady(): boolean {
-    return this.probeOk && this.lifecycle === 'active';
+    return this.probeOk && this.lifecycleState === 'active';
   }
 
   flushFiles(): Promise<void> {
@@ -250,7 +283,7 @@ export class WorkerVmClient implements VmShell {
   }
 
   private send(message: MainToWorkerMessage, transfer?: Transferable[]): void {
-    if (this.lifecycle !== 'active') return;
+    if (this.lifecycleState !== 'active') return;
     try {
       this.worker.postMessage(message, transfer ?? []);
     } catch (error) {
@@ -265,7 +298,7 @@ export class WorkerVmClient implements VmShell {
     allowDestroying = false,
     timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<T> {
-    if (this.lifecycle !== 'active' && !(allowDestroying && this.lifecycle === 'destroying')) {
+    if (this.lifecycleState !== 'active' && !(allowDestroying && this.lifecycleState === 'destroying')) {
       return Promise.reject(this.lifecycleError());
     }
     const requestId = createRequestId();
@@ -285,7 +318,7 @@ export class WorkerVmClient implements VmShell {
         },
       });
       const message = build(requestId);
-      if (this.lifecycle === 'active') this.send(message, transfer);
+      if (this.lifecycleState === 'active') this.send(message, transfer);
       else {
         try {
           this.worker.postMessage(message, transfer ?? []);
@@ -299,7 +332,7 @@ export class WorkerVmClient implements VmShell {
   }
 
   private handleMessage(message: WorkerToMainMessage): void {
-    if (this.lifecycle === 'destroyed' || this.lifecycle === 'fatal') return;
+    if (this.lifecycleState === 'destroyed' || this.lifecycleState === 'fatal') return;
     switch (message.type) {
       case 'probe': {
         const supported = message.ready;
@@ -360,6 +393,9 @@ export class WorkerVmClient implements VmShell {
       case 'state-reply':
         this.resolveRequest(message.requestId, message.value);
         break;
+      case 'lifecycle-reply':
+        this.resolveRequest(message.requestId, message.value);
+        break;
       case 'guest-speed-flag-reply':
         this.resolveRequest(message.requestId, message.value);
         break;
@@ -414,7 +450,7 @@ export class WorkerVmClient implements VmShell {
   }
 
   private ensureActive(): void {
-    if (this.lifecycle !== 'active') throw this.lifecycleError();
+    if (this.lifecycleState !== 'active') throw this.lifecycleError();
   }
 
   private lifecycleError(): Error {
@@ -422,12 +458,12 @@ export class WorkerVmClient implements VmShell {
   }
 
   private handleFatal(reason: Error): void {
-    if (this.lifecycle === 'fatal' || this.lifecycle === 'destroyed') return;
-    const destroying = this.lifecycle === 'destroying';
+    if (this.lifecycleState === 'fatal' || this.lifecycleState === 'destroyed') return;
+    const destroying = this.lifecycleState === 'destroying';
     const wasProbed = this.probeOk;
     this.fatalReason = reason;
     reportNativeRuntimeError('fatalVM', reason);
-    this.lifecycle = 'fatal';
+    this.lifecycleState = 'fatal';
     if (this.probeTimer !== null) globalThis.clearTimeout(this.probeTimer);
     this.probeTimer = null;
     this.rejectProbe?.(reason);
@@ -479,7 +515,7 @@ export class WorkerVmClient implements VmShell {
     this.rejectProbe?.(reason);
     this.resolveProbe = null;
     this.rejectProbe = null;
-    this.lifecycle = 'destroyed';
+    this.lifecycleState = 'destroyed';
   }
 
   /**

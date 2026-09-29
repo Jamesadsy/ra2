@@ -23,6 +23,7 @@ import { WorkerVmClient, type WorkerVmClientOptions } from './vmClient';
 import type { GuestMemRecordResult } from './memRecord';
 import type { GameFileEntry, VmInitConfig } from './vmProtocol';
 import type { VmPointerState, VmShell } from './vmShell';
+import type { VmLifecycleAction, VmLifecycleReport } from './vmLifecycle';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import { reportNativeRuntimeError, reportNativeRuntimePhase } from '../platform/browser/nativeDiagnostics';
 import { withGameResolutionOverride } from '../games/resolution';
@@ -284,6 +285,24 @@ export class Win32GameVm implements VmShell {
 
   async stop(): Promise<void> {
     await this.core.stop();
+  }
+
+  async lifecycle(action: VmLifecycleAction | 'audio-unlock'): Promise<VmLifecycleReport> {
+    if (action === 'audio-unlock') {
+      const [worker, unlockResult] = await Promise.all([this.core.getLifecycleSnapshot(), this.audio.unlock()]);
+      return { action, worker, audio: this.audio.getLifecycleSnapshot(unlockResult) };
+    }
+    if (action === 'pause') {
+      const worker = await this.core.pauseForLifecycle();
+      const audio = await this.audio.suspendForLifecycle();
+      return { action, worker, audio };
+    }
+    if (action === 'resume') {
+      const worker = await this.core.resumeForLifecycle();
+      const audio = worker.safeToResume ? await this.audio.resumeForLifecycle() : this.audio.getLifecycleSnapshot();
+      return { action, worker, audio };
+    }
+    return { action, worker: this.core.getLifecycleSnapshot(), audio: this.audio.getLifecycleSnapshot() };
   }
 
   flushFiles(): Promise<void> {

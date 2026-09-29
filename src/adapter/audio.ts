@@ -4,6 +4,7 @@
  * This module does not depend on the Win32 shim: the shim translates CreateSoundBuffer/Lock/Unlock/Play and similar calls into the corresponding operations while retaining ownership of guest memory.
  */
 import { DEFAULT_PCM_FORMAT, normalizePcmWaveFormat, type PcmPlayOptions, type PcmWaveFormat } from '../vm86/audio';
+import type { VmAudioLifecycleSnapshot } from './vmLifecycle';
 export { DEFAULT_PCM_FORMAT, normalizePcmWaveFormat, parsePcmWaveFormatEx } from '../vm86/audio';
 export type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 
@@ -67,6 +68,11 @@ interface PcmBufferState {
   /** Preferred live-stream path: AudioWorklet rendering on the audio thread. */
   worklet: AudioWorkletNode | null;
   streamFrame: number;
+  /** Remember live DirectSound ring playback so resume does not degrade it to a stale one-shot snapshot. */
+  lifecycleWasLiveStreamed: boolean;
+  lastWriteAt: number | null;
+  writeCount: number;
+  frequencyChangeCount: number;
   /** Context time of the latest worklet position message, used as the cursor extrapolation baseline. */
   workletPositionAt: number;
   gain: GainNode | null;
@@ -117,11 +123,25 @@ export class WebAudioPcmSink {
   private masterVolume = DEFAULT_MASTER_VOLUME;
 
   /** Guest activity since the last diagnostics line; only maintained when diagnostics are enabled. */
-  private readonly activity = { plays: 0, stops: 0, writes: 0, writeBytes: 0, errors: 0, lastError: '' };
+  private readonly activity = {
+    plays: 0,
+    stops: 0,
+    writes: 0,
+    writeBytes: 0,
+    errors: 0,
+    lastError: '',
+    sourceStarts: 0,
+    streamStarts: 0,
+    workletStarts: 0,
+    dynamicStreamWrites: 0,
+    bufferCreates: 0,
+    bufferDuplicates: 0,
+  };
   private diagnosticsTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   private lastDiagnosticsContextTime: number | null = null;
   /** Last processor count reported by the audio thread; grows without bound if disconnected nodes are never collected. */
   private liveWorkletProcessors = 0;
+  private dynamicWriteStartedAt: number | null = null;
 
   constructor(private readonly options: WebAudioPcmSinkOptions = {}) {
     if (options.diagnosticsIntervalMs) {
@@ -131,6 +151,7 @@ export class WebAudioPcmSink {
 
   createBuffer(id: PcmBufferId, byteLength: number, format: PcmWaveFormat = DEFAULT_PCM_FORMAT as PcmWaveFormat): void {
     this.assertAlive();
+    this.activity.bufferCreates++;
     this.releaseBuffer(id);
     const normalized = normalizePcmWaveFormat(format);
     const size = clamp(Math.trunc(byteLength), 0, 64 * 1024 * 1024);
@@ -142,6 +163,10 @@ export class WebAudioPcmSink {
       stream: null,
       worklet: null,
       streamFrame: 0,
+      lifecycleWasLiveStreamed: false,
+      lastWriteAt: null,
+      writeCount: 0,
+      frequencyChangeCount: 0,
       workletPositionAt: 0,
       gain: null,
       panner: null,
@@ -159,6 +184,7 @@ export class WebAudioPcmSink {
   duplicateBuffer(sourceId: PcmBufferId, destinationId: PcmBufferId): boolean {
     const source = this.buffers.get(sourceId);
     if (!source) return false;
+    this.activity.bufferDuplicates++;
     this.createBuffer(destinationId, source.pcm.byteLength, source.format);
     const destination = this.buffers.get(destinationId)!;
     destination.pcm.set(source.pcm);
@@ -191,15 +217,21 @@ export class WebAudioPcmSink {
     const start = clamp(Math.trunc(offset), 0, state.pcm.byteLength);
     const length = Math.min(bytes.byteLength, state.pcm.byteLength - start);
     if (length <= 0) return 0;
+    state.lastWriteAt = performance.now();
+    state.writeCount++;
 
     // RA2/Bink continually overwrites the DirectSound ring buffer during DSBPLAY_LOOPING playback.
     // AudioBufferSourceNode plays only its creation-time snapshot; rebuilding the source on every Unlock
     // repeatedly rewound playback and accumulated WebAudio nodes, potentially overwhelming the renderer. On the first dynamic overwrite,
     // switch to one live ring player; subsequent writes update only the PCM mirror without resetting the playback cursor.
     const switchToLiveStream = state.playing && state.loop && state.source !== null;
+    if (state.playing && state.loop && (state.stream || state.worklet)) {
+      this.activity.dynamicStreamWrites++;
+      this.dynamicWriteStartedAt ??= performance.now();
+    }
     state.pcm.set(bytes.subarray(0, length), start);
     state.decoded = null;
-    if (switchToLiveStream) this.startLiveStream(state);
+    if (switchToLiveStream) void this.startLiveStream(state);
     // Worklet path: synchronize the written range with the audio-thread renderer immediately.
     if (state.worklet && state.playing) {
       this.postWorkletUpdate(state, state.worklet, start, bytes.subarray(0, length));
@@ -296,7 +328,9 @@ export class WebAudioPcmSink {
     const liveStream = state.stream !== null || state.worklet !== null;
     if (!liveStream) this.detachPlayback(state, false);
     // DSBFREQUENCY_ORIGINAL = 0。
-    state.frequency = frequency === 0 ? state.format.nSamplesPerSec : clamp(Math.trunc(frequency), 100, 200_000);
+    const nextFrequency = frequency === 0 ? state.format.nSamplesPerSec : clamp(Math.trunc(frequency), 100, 200_000);
+    if (nextFrequency !== state.frequency) state.frequencyChangeCount++;
+    state.frequency = nextFrequency;
     state.positionBytes = position;
     if (wasPlaying && !liveStream) this.start(state);
     if (state.worklet) {
@@ -325,6 +359,17 @@ export class WebAudioPcmSink {
     return {
       contextState: this.context?.state ?? 'uncreated',
       contextTimeSeconds: this.context?.currentTime ?? null,
+      contextSampleRateHz: this.context?.sampleRate ?? null,
+      sourceStartCount: this.activity.sourceStarts,
+      streamStartCount: this.activity.streamStarts,
+      workletStartCount: this.activity.workletStarts,
+      dynamicStreamWrites: this.activity.dynamicStreamWrites,
+      dynamicStreamWriteRateHz:
+        this.dynamicWriteStartedAt === null
+          ? 0
+          : (this.activity.dynamicStreamWrites * 1_000) / Math.max(1, performance.now() - this.dynamicWriteStartedAt),
+      bufferCreateCount: this.activity.bufferCreates,
+      bufferDuplicateCount: this.activity.bufferDuplicates,
       buffers: [...this.buffers.entries()].map(([id, state]) => ({
         id,
         byteLength: state.pcm.byteLength,
@@ -332,12 +377,114 @@ export class WebAudioPcmSink {
         playing: state.playing,
         loop: state.loop,
         sampleRate: state.format.nSamplesPerSec,
+        channels: state.format.nChannels,
+        bitsPerSample: state.format.wBitsPerSample,
         blockAlign: state.format.nBlockAlign,
+        frequency: state.frequency,
+        writeCount: state.writeCount,
+        writeAgeMs: state.lastWriteAt === null ? null : Math.max(0, performance.now() - state.lastWriteAt),
+        frequencyChangeCount: state.frequencyChangeCount,
         worklet: state.worklet !== null,
         scriptStream: state.stream !== null,
         source: state.source !== null,
       })),
     };
+  }
+
+  getLifecycleSnapshot(unlockResult?: boolean): VmAudioLifecycleSnapshot {
+    const context = this.context;
+    const now = context?.currentTime ?? null;
+    const playing = [...this.buffers.values()].filter((state) => state.playing);
+    let staleWorklets = 0;
+    for (const state of playing) {
+      if (state.worklet && context?.state === 'running' && now !== null && now - state.workletPositionAt > 1) {
+        staleWorklets++;
+      }
+    }
+    return {
+      contextState: context?.state ?? 'uncreated',
+      contextTimeSeconds: now,
+      contextSampleRateHz: context?.sampleRate ?? null,
+      playingBuffers: playing.length,
+      sourceCount: playing.filter((state) => state.source).length,
+      streamCount: playing.filter((state) => state.stream).length,
+      workletCount: playing.filter((state) => state.worklet).length,
+      staleWorklets,
+      liveProcessorCount: this.liveWorkletProcessors,
+      sourceStartCount: this.activity.sourceStarts,
+      streamStartCount: this.activity.streamStarts,
+      workletStartCount: this.activity.workletStarts,
+      dynamicStreamWrites: this.activity.dynamicStreamWrites,
+      dynamicStreamWriteRateHz:
+        this.dynamicWriteStartedAt === null
+          ? 0
+          : (this.activity.dynamicStreamWrites * 1_000) / Math.max(1, performance.now() - this.dynamicWriteStartedAt),
+      bufferCreateCount: this.activity.bufferCreates,
+      bufferDuplicateCount: this.activity.bufferDuplicates,
+      buffers: [...this.buffers.values()].slice(0, 16).map((state, index) => ({
+        ordinal: index + 1,
+        positionFrames: Math.floor(this.currentPosition(state) / state.format.nBlockAlign),
+        totalFrames: Math.floor(state.pcm.byteLength / state.format.nBlockAlign),
+        sampleRate: state.format.nSamplesPerSec,
+        channels: state.format.nChannels,
+        bitsPerSample: state.format.wBitsPerSample,
+        frequency: state.frequency,
+        writeCount: state.writeCount,
+        writeAgeMs: state.lastWriteAt === null ? null : Math.max(0, performance.now() - state.lastWriteAt),
+        frequencyChangeCount: state.frequencyChangeCount,
+        playing: state.playing,
+        loop: state.loop,
+        source: state.source !== null,
+        stream: state.stream !== null,
+        worklet: state.worklet !== null,
+      })),
+      sampleRates: [...new Set(playing.map((state) => state.format.nSamplesPerSec))].slice(0, 8),
+      frequencies: [...new Set(playing.map((state) => state.frequency))].slice(0, 8),
+      formats: [
+        ...new Map(
+          playing.map((state) => [
+            `${state.format.nSamplesPerSec}:${state.format.nChannels}:${state.format.wBitsPerSample}:${state.format.nBlockAlign}`,
+            {
+              sampleRate: state.format.nSamplesPerSec,
+              channels: state.format.nChannels,
+              bitsPerSample: state.format.wBitsPerSample,
+              blockAlign: state.format.nBlockAlign,
+            },
+          ]),
+        ).values(),
+      ].slice(0, 8),
+      ...(unlockResult === undefined ? {} : { unlockResult }),
+    };
+  }
+
+  /** Checkpoint cursors and tear down live nodes before iOS suspends the page's audio thread. */
+  async suspendForLifecycle(): Promise<VmAudioLifecycleSnapshot> {
+    const before = this.getLifecycleSnapshot();
+    for (const state of this.buffers.values()) {
+      if (state.playing) {
+        state.lifecycleWasLiveStreamed = state.stream !== null || state.worklet !== null;
+        state.positionBytes = state.worklet
+          ? Math.floor(state.streamFrame) * state.format.nBlockAlign
+          : this.currentPosition(state);
+      }
+      this.detachPlayback(state, false);
+    }
+    const context = this.context;
+    if (context && context.state === 'running') {
+      try {
+        await context.suspend();
+      } catch (error) {
+        this.report(error);
+      }
+    }
+    return { ...this.getLifecycleSnapshot(), staleWorkletsDetected: before.staleWorklets };
+  }
+
+  /** Try a seamless foreground resume; if iOS requires a gesture, persistent unlock hooks rebuild playback on first input. */
+  async resumeForLifecycle(): Promise<VmAudioLifecycleSnapshot> {
+    if (!this.context) return this.getLifecycleSnapshot();
+    const unlocked = await this.unlock();
+    return this.getLifecycleSnapshot(unlocked);
   }
 
   releaseBuffer(id: PcmBufferId): boolean {
@@ -362,10 +509,21 @@ export class WebAudioPcmSink {
     const context = this.ensureContext();
     if (!context) return false;
     try {
-      if (context.state === 'suspended') await context.resume();
+      if (context.state !== 'running') await context.resume();
       if (context.state !== 'running') return false;
       for (const state of this.buffers.values()) {
-        if (state.playing && !state.source && !state.stream && !state.worklet) this.start(state);
+        if (!state.playing) continue;
+        if (state.worklet && context.currentTime - state.workletPositionAt > 1) {
+          // The AudioWorklet object can remain attached after iOS suspends its render thread. Restore the last
+          // cursor actually acknowledged by the worklet instead of extrapolating across the suspension.
+          state.positionBytes = Math.floor(state.streamFrame) * state.format.nBlockAlign;
+          this.detachPlayback(state, false);
+        }
+        if (!state.source && !state.stream && !state.worklet) this.start(state);
+        if (state.lifecycleWasLiveStreamed && state.source) {
+          await this.startLiveStream(state);
+          state.lifecycleWasLiveStreamed = false;
+        }
       }
       return true;
     } catch (error) {
@@ -429,15 +587,17 @@ export class WebAudioPcmSink {
    * Seamlessly replace a looping static snapshot with a long-lived live PCM reader.
    * Prefer AudioWorklet (pcmStreamWorklet.js) on the audio thread so busy main-thread frames do not interrupt sound; fall back to ScriptProcessor, whose legacy WebAudio callback runs on the main thread. Both match ring-buffer semantics better than creating an AudioBufferSourceNode for every DirectSound Unlock, and replace repeated whole-buffer Bink/music decoding with linear reads per output quantum.
    */
-  private startLiveStream(state: PcmBufferState): void {
+  private async startLiveStream(state: PcmBufferState): Promise<void> {
     const context = this.context;
     if (!context || state.stream || state.worklet || !state.source || !state.playing) return;
     if (typeof AudioWorkletNode !== 'undefined' && context.audioWorklet) {
-      void this.startWorkletStream(state, context).catch((error) => {
+      try {
+        await this.startWorkletStream(state, context);
+      } catch (error) {
         this.report(error);
         // On module-load failure or similar errors, fall back to main-thread ScriptProcessor; the source is still playing and the condition still holds.
         if (state.source && !state.stream && !state.worklet) this.startScriptProcessorStream(state, context);
-      });
+      }
       return;
     }
     this.startScriptProcessorStream(state, context);
@@ -487,6 +647,7 @@ export class WebAudioPcmSink {
     state.streamFrame = frame;
     state.workletPositionAt = context.currentTime;
     state.positionBytes = current;
+    this.activity.workletStarts++;
 
     oldSource.onended = null;
     try {
@@ -562,6 +723,7 @@ export class WebAudioPcmSink {
       state.gain = gain;
       state.panner = panner;
       state.positionBytes = current;
+      this.activity.streamStarts++;
 
       oldSource.onended = null;
       try {
@@ -594,17 +756,22 @@ export class WebAudioPcmSink {
         : null;
     const view = samples16 ? null : new DataView(state.pcm.buffer, state.pcm.byteOffset, state.pcm.byteLength);
     const bytesPerSample = state.format.wBitsPerSample >>> 3;
+    const readFrameSample = (frameIndex: number, channel: number): number => {
+      const sourceChannel = Math.min(channel, state.format.nChannels - 1);
+      if (samples16) return samples16[frameIndex * state.format.nChannels + sourceChannel]! / 32_768;
+      const offset = frameIndex * state.format.nBlockAlign + sourceChannel * bytesPerSample;
+      return readPcmSample(view!, offset, state.format.wBitsPerSample);
+    };
     let frame = state.streamFrame;
     for (let index = 0; index < output.length; index++) {
-      const sourceFrame = Math.floor(frame) % totalFrames;
+      const sourceFrame = frame % totalFrames;
+      const lowerFrame = Math.floor(sourceFrame);
+      const nextFrame = state.loop ? (lowerFrame + 1) % totalFrames : Math.min(lowerFrame + 1, totalFrames - 1);
+      const fraction = sourceFrame - lowerFrame;
       for (let channel = 0; channel < channels.length; channel++) {
-        const sourceChannel = Math.min(channel, state.format.nChannels - 1);
-        if (samples16) {
-          channels[channel]![index] = samples16[sourceFrame * state.format.nChannels + sourceChannel]! / 32_768;
-        } else {
-          const offset = sourceFrame * state.format.nBlockAlign + sourceChannel * bytesPerSample;
-          channels[channel]![index] = readPcmSample(view!, offset, state.format.wBitsPerSample);
-        }
+        const first = readFrameSample(lowerFrame, channel);
+        const next = readFrameSample(nextFrame, channel);
+        channels[channel]![index] = first + (next - first) * fraction;
       }
       frame += step;
       if (frame >= totalFrames) {
@@ -656,6 +823,7 @@ export class WebAudioPcmSink {
         }
       };
       source.start(when, Math.min(frame / state.format.nSamplesPerSec, audio.duration));
+      this.activity.sourceStarts++;
     } catch (error) {
       this.report(error);
     }

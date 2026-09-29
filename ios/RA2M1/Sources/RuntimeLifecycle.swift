@@ -17,11 +17,19 @@ final class RuntimeLifecycleCoordinator {
 
     func applicationDidEnterBackground() {
         phase = .background
-        // WKWebView's document visibility event releases held touch keys and gives Route B a pagehide flush.
+        dispatchLifecycle("background")
     }
 
     func applicationWillEnterForeground() {
         phase = .foreground
-        // Keep the live guest and persistent WebsiteDataStore intact; audio unlock retries on the next user gesture.
+        dispatchLifecycle("foreground")
+    }
+
+    private func dispatchLifecycle(_ nextPhase: String, at date: Date = Date()) {
+        let timestampMs = date.timeIntervalSince1970 * 1_000
+        let script = "window.__RA2NativeLifecycle && window.__RA2NativeLifecycle('\(nextPhase)', \(timestampMs));"
+        webView.evaluateJavaScript(script) { _, _ in
+            // The page records lifecycle status through the existing bounded User/Debug bridge.
+        }
     }
 }

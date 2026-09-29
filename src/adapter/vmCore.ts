@@ -51,6 +51,7 @@ import type { VmPointerState } from './vmShell';
 import type { GameVmCallbacks, VmStatus } from '../app/session/runtimeEvents';
 import type { VmExecutionProbe } from '../vm86/diagnostics';
 import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
+import type { VmLifecycleSnapshot } from './vmLifecycle';
 
 const DEFAULT_GUEST_MEMORY_SIZE = 128 * 1024 * 1024;
 /** Recording sample interval: v86 has no per-write hook, so modification counts approximate sampling windows, incrementing once per window. */
@@ -116,6 +117,11 @@ export class VmCore {
   /** Development-only periodic console diagnostics for long sessions (heap, stubs, sound buffers, logic FPS). */
   private diagnosticsTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   private handling = false;
+  private lifecyclePaused = false;
+  private lifecycleCycles = 0;
+  private pendingFileReads = 0;
+  private lifecycleFlushOk: boolean | null = null;
+  private guestLogicFrame = 0;
   private calls = 0;
   private readonly recentCalls: string[] = [];
   private lastCallStack: { key: string; stack: number; returnAddress: number } | null = null;
@@ -280,7 +286,10 @@ export class VmCore {
           this.hasPresentedFrame = true;
           this.callbacks.onFrame?.(frame);
         },
-        onLogicFrame: () => this.callbacks.onLogicFrame?.(1),
+        onLogicFrame: () => {
+          this.guestLogicFrame++;
+          this.callbacks.onLogicFrame?.(1);
+        },
         scheduleFrame: this.platform.scheduleFrame,
         deferFrameSnapshot: this.platform.deferFrameSnapshot,
         packedRgb565Frames: this.platform.packedRgb565Frames,
@@ -307,11 +316,7 @@ export class VmCore {
       this.shim.setGameClockRate(this.gameClockRate);
       this.status('ready', `游戏内存已就绪：${game.title}，目录：${gameFiles.label}`);
 
-      // Port events are primary; 50ms polling is only a fallback for CPU exceptions and exceptional conditions.
-      this.pollTimer = globalThis.setInterval(() => void this.poll(), 50);
-      if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
-        this.diagnosticsTimer = globalThis.setInterval(() => void this.logDiagnostics(), DIAGNOSTICS_INTERVAL_MS);
-      }
+      this.startPolling();
       await emulator.run();
       this.status('running', `${game.executable} 正在 v86 中执行（入口 0x${image.entry.toString(16)}）`);
     } catch (error) {
@@ -327,6 +332,88 @@ export class VmCore {
     if (this.emulator?.is_running()) await this.emulator.stop();
     this.platform.audio.stopAll();
     this.status('stopped', 'VM 已停止');
+  }
+
+  async pauseForLifecycle(): Promise<VmLifecycleSnapshot> {
+    if (!this.lifecyclePaused) {
+      this.lifecyclePaused = true;
+      this.lifecycleCycles++;
+      this.clearPoll();
+      const emulator = this.emulator;
+      if (emulator?.is_running()) await emulator.stop();
+      this.shim?.pauseGuestClockForLifecycle();
+      try {
+        await this.flushFiles();
+        this.lifecycleFlushOk = true;
+      } catch {
+        this.lifecycleFlushOk = false;
+      }
+    }
+    return this.getLifecycleSnapshot();
+  }
+
+  async resumeForLifecycle(timeoutMs = 3_000): Promise<VmLifecycleSnapshot> {
+    if (!this.lifecyclePaused) return this.getLifecycleSnapshot();
+    const emulator = this.emulator;
+    const shim = this.shim;
+    if (!emulator || !shim || this.currentPhase !== 'running') return this.getLifecycleSnapshot('runtime-unavailable');
+
+    shim.resumeGuestClockForLifecycle();
+    const deadline = performance.now() + timeoutMs;
+    while (this.handling && performance.now() < deadline) {
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 20));
+    }
+    if (this.lifecycleFlushOk === false) {
+      shim.pauseGuestClockForLifecycle();
+      return this.getLifecycleSnapshot('flush-failed');
+    }
+    if (this.handling || this.pendingFileReads > 0) {
+      shim.pauseGuestClockForLifecycle();
+      return this.getLifecycleSnapshot('pending-read');
+    }
+
+    try {
+      await emulator.run();
+      this.lifecyclePaused = false;
+      this.lifecycleFlushOk = null;
+      this.startPolling();
+      return this.getLifecycleSnapshot();
+    } catch {
+      shim.pauseGuestClockForLifecycle();
+      return this.getLifecycleSnapshot('runtime-unavailable');
+    }
+  }
+
+  getLifecycleSnapshot(recoveryReasonOverride?: VmLifecycleSnapshot['recoveryReason']): VmLifecycleSnapshot {
+    const clock = this.shim?.inspectGuestClockForLifecycle();
+    const range = this.rangePrefetch.snapshot();
+    const runtimeAvailable = !!this.emulator && !!this.shim && this.currentPhase === 'running';
+    const recoveryReason =
+      recoveryReasonOverride ??
+      (runtimeAvailable
+        ? this.lifecycleFlushOk === false
+          ? 'flush-failed'
+          : this.handling || this.pendingFileReads > 0
+            ? 'pending-read'
+            : null
+        : 'runtime-unavailable');
+    return {
+      observedAtEpochMs: Date.now(),
+      phase: this.currentPhase,
+      guestLogicFrame: this.guestLogicFrame,
+      guestTimeMs: clock?.guestTimeMs ?? null,
+      guestClockPaused: clock?.paused ?? false,
+      workerRunning: this.emulator?.is_running() ?? false,
+      hypercallPending: this.handling,
+      pendingFileReads: this.pendingFileReads,
+      pendingFileWrites: this.pendingFileWrites.size,
+      rangePrefetchPending: range.pending,
+      rangePrefetchSpeculating: range.speculating,
+      lifecycleCycles: this.lifecycleCycles,
+      flushOk: this.lifecycleFlushOk,
+      safeToResume: recoveryReason === null,
+      recoveryReason,
+    };
   }
 
   postMessage(message: number, wParam = 0, lParam = 0): void {
@@ -522,7 +609,7 @@ export class VmCore {
   }
 
   private async poll(): Promise<void> {
-    if (this.handling || !this.emulator || !this.image || !this.shim) return;
+    if (this.lifecyclePaused || this.handling || !this.emulator || !this.image || !this.shim) return;
     const exception = this.readU32(HYPERCALL_EXCEPTION);
     if (exception !== 0) {
       this.clearPoll();
@@ -605,7 +692,10 @@ export class VmCore {
       // Win32 APIs are synchronous; the host can complete asynchronous browser fetches while the hypercall stub waits.
       if (imported.key === 'KERNEL32.DLL!FindFirstFileA' && call.args[0] && call.args[1]) {
         const pattern = this.readCString(call.args[0]);
-        this.shim.setFileSearchResults(pattern, await readGuestFileSearch(this.source.files, pattern));
+        this.shim.setFileSearchResults(
+          pattern,
+          await this.trackFileRead(readGuestFileSearch(this.source.files, pattern)),
+        );
       }
       if (
         (imported.key === 'KERNEL32.DLL!CreateFileA' ||
@@ -615,13 +705,13 @@ export class VmCore {
         call.args[0]
       ) {
         const sync = this.syncGuestFile(call.args[0]);
-        if (sync) await sync;
+        if (sync) await this.trackFileRead(sync);
       }
       // Structured storage opens a UTF-16 path directly, without a preceding CreateFileA.
       // Wait for browser-backed saves on the first open, just like ordinary file APIs.
       if (imported.key === 'OLE32.DLL!StgOpenStorage' && call.args[0]) {
         const sync = this.syncGuestFile(call.args[0], true);
-        if (sync) await sync;
+        if (sync) await this.trackFileRead(sync);
       }
 
       // Keep only MOVIES*.MIX index prefixes resident. When the original game seeks to a BIK segment,
@@ -633,12 +723,8 @@ export class VmCore {
       ) {
         const range = this.shim.inspectFileReadRequest(call.args[0], call.args[2]);
         if (range && this.source.files.readRange) {
-          const bytes = await this.rangePrefetch.read(
-            this.source.files,
-            range.path,
-            range.offset,
-            range.length,
-            range.totalSize,
+          const bytes = await this.trackFileRead(
+            this.rangePrefetch.read(this.source.files, range.path, range.offset, range.length, range.totalSize),
           );
           if (bytes) this.shim.mountFileRange(range.path, range.offset, bytes);
         }
@@ -818,6 +904,24 @@ export class VmCore {
     this.pollTimer = null;
     if (this.diagnosticsTimer !== null) globalThis.clearInterval(this.diagnosticsTimer);
     this.diagnosticsTimer = null;
+  }
+
+  private startPolling(): void {
+    if (this.lifecyclePaused || this.pollTimer !== null) return;
+    // Port events are primary; 50ms polling is only a fallback for CPU exceptions and exceptional conditions.
+    this.pollTimer = globalThis.setInterval(() => void this.poll(), 50);
+    if (import.meta.env.DEV && import.meta.env.MODE !== 'test' && this.diagnosticsTimer === null) {
+      this.diagnosticsTimer = globalThis.setInterval(() => void this.logDiagnostics(), DIAGNOSTICS_INTERVAL_MS);
+    }
+  }
+
+  private async trackFileRead<T>(read: Promise<T>): Promise<T> {
+    this.pendingFileReads++;
+    try {
+      return await read;
+    } finally {
+      this.pendingFileReads--;
+    }
   }
 
   private async logDiagnostics(): Promise<void> {

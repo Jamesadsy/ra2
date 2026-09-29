@@ -4,6 +4,7 @@ import type { WebAudioPcmSink } from '../../src/adapter/audio';
 import type { VmInitConfig, WorkerToMainMessage } from '../../src/adapter/vmProtocol';
 import type { GameVmCallbacks, VmStatus } from '../../src/app/session/runtimeEvents';
 import type { VmFrame } from '../../src/vm86/win32';
+import type { VmAudioLifecycleSnapshot, VmLifecycleAction, VmLifecycleSnapshot } from '../../src/adapter/vmLifecycle';
 
 class FakeWorker {
   onmessage: ((event: MessageEvent<WorkerToMainMessage>) => void) | null = null;
@@ -77,13 +78,14 @@ function setup(
     onTerminated?: () => void;
     startupTimeoutMs?: number;
     recycleFrames?: boolean;
+    audio?: WebAudioPcmSink;
   } = {},
   callbacks: GameVmCallbacks = {},
   emitProbe = true,
 ) {
   const { ...clientOptions } = options;
   const worker = new FakeWorker();
-  const audio = fakeAudio();
+  const audio = options.audio ?? fakeAudio();
   vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
   vi.stubGlobal('document', {});
   const client = new WorkerVmClient(callbacks, initConfig(), {
@@ -214,6 +216,102 @@ describe('WorkerVmClient RPC lifecycle', () => {
     worker.emitMessageError();
     await rejected;
     await client.destroy();
+  });
+
+  it('round-trips probe, pause and resume over the same Worker before changing main-thread audio state', async () => {
+    const audioSnapshot: VmAudioLifecycleSnapshot = {
+      contextState: 'running',
+      contextTimeSeconds: 12,
+      contextSampleRateHz: 48_000,
+      playingBuffers: 1,
+      sourceCount: 0,
+      streamCount: 0,
+      workletCount: 1,
+      staleWorklets: 0,
+      liveProcessorCount: 1,
+      sourceStartCount: 2,
+      streamStartCount: 0,
+      workletStartCount: 1,
+      dynamicStreamWrites: 3,
+      dynamicStreamWriteRateHz: 4,
+      bufferCreateCount: 1,
+      bufferDuplicateCount: 0,
+      buffers: [
+        {
+          ordinal: 1,
+          positionFrames: 2_000,
+          totalFrames: 10_000,
+          sampleRate: 22_050,
+          channels: 1,
+          bitsPerSample: 16,
+          frequency: 22_050,
+          writeCount: 3,
+          writeAgeMs: 12,
+          frequencyChangeCount: 0,
+          playing: true,
+          loop: true,
+          source: false,
+          stream: false,
+          worklet: true,
+        },
+      ],
+      sampleRates: [22_050],
+      frequencies: [22_050],
+      formats: [{ sampleRate: 22_050, channels: 1, bitsPerSample: 16, blockAlign: 2 }],
+    };
+    const workerSnapshot: VmLifecycleSnapshot = {
+      observedAtEpochMs: 100,
+      phase: 'running',
+      guestLogicFrame: 80,
+      guestTimeMs: 1_200,
+      guestClockPaused: false,
+      workerRunning: true,
+      hypercallPending: false,
+      pendingFileReads: 0,
+      pendingFileWrites: 0,
+      rangePrefetchPending: false,
+      rangePrefetchSpeculating: false,
+      lifecycleCycles: 0,
+      flushOk: null,
+      safeToResume: true,
+      recoveryReason: null,
+    };
+    const audio = {
+      ...fakeAudio(),
+      getLifecycleSnapshot: vi.fn(() => audioSnapshot),
+      suspendForLifecycle: vi.fn(async () => audioSnapshot),
+      resumeForLifecycle: vi.fn(async () => ({ ...audioSnapshot, unlockResult: true })),
+    } as unknown as WebAudioPcmSink;
+    const { worker, client } = setup({ audio });
+    const exchange = async (action: VmLifecycleAction) => {
+      const pending = client.lifecycle(action);
+      const request = [...worker.posts].reverse().find((item) => (item as { type?: string }).type === 'lifecycle') as
+        { action: VmLifecycleAction; requestId: number } | undefined;
+      expect(request?.action).toBe(action);
+      worker.emit({ type: 'lifecycle-reply', action, requestId: request!.requestId, value: workerSnapshot });
+      return pending;
+    };
+
+    await expect(exchange('probe')).resolves.toMatchObject({ action: 'probe', worker: workerSnapshot });
+    await expect(exchange('pause')).resolves.toMatchObject({
+      action: 'pause',
+      worker: workerSnapshot,
+      audio: audioSnapshot,
+    });
+    await expect(exchange('resume')).resolves.toMatchObject({ action: 'resume', worker: workerSnapshot });
+    expect(
+      (audio as unknown as { suspendForLifecycle: ReturnType<typeof vi.fn> }).suspendForLifecycle,
+    ).toHaveBeenCalledOnce();
+    expect(
+      (audio as unknown as { resumeForLifecycle: ReturnType<typeof vi.fn> }).resumeForLifecycle,
+    ).toHaveBeenCalledOnce();
+    expect(worker.posts.filter((item) => (item as { type?: string }).type === 'lifecycle')).toHaveLength(3);
+
+    const destroying = client.destroy();
+    worker.emit({ type: 'control-done', action: 'stop', requestId: requestId(worker, 'control') });
+    await Promise.resolve();
+    worker.emit({ type: 'flush-done', requestId: requestId(worker, 'flush') });
+    await destroying;
   });
 
   it('rejects and removes a request-scoped worker error without killing the worker', async () => {
