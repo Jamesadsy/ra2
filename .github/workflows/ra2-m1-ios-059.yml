@@ -59,7 +59,7 @@ jobs:
             src/adapter/vmCore.ts src/adapter/vmLifecycle.ts src/adapter/runtimeLifecycleCoordinator.ts src/adapter/rangePrefetch.ts src/adapter/vmShell.ts \
             src/vm86/clock.ts src/vm86/shim/state.ts \
             src/platform/browser/ea108MobileHost.ts src/platform/browser/files/directoryAccess.ts src/platform/browser/files/http.ts \
-            src/ui/pages/game/page.ts src/ui/pages/game/AppShell.tsx src/ui/pages/game/gameInput.ts src/ui/pages/game/styles.css src/ui/pages/game/vmPageResolution.ts src/ui/pages/game/touchControls.ts src/ui/shared/components/UiErrorBoundary.tsx tests/basic/ciConfiguration.test.ts tests/basic/ea108MobileHost.test.ts \
+            src/ui/pages/game/page.ts src/ui/pages/game/AppShell.tsx src/ui/pages/game/gameInput.ts src/ui/pages/game/styles.css src/ui/pages/game/vmPageResolution.ts src/ui/pages/game/touchControls.ts src/ui/pages/game/state/uiState.ts src/ui/shared/components/UiErrorBoundary.tsx tests/basic/ciConfiguration.test.ts tests/basic/ea108MobileHost.test.ts tests/basic/uiState.test.ts \
             tests/basic/gameInput.test.ts tests/basic/clock.test.ts tests/basic/runtimeLifecycleCoordinator.test.ts tests/basic/canvasFit.test.ts tests/basic/input.test.ts tests/basic/resolution.test.ts tests/basic/pageStartup.test.ts tests/basic/vmClient.test.ts tests/basic/audioWorkletResampling.test.ts tests/basic/browser/touchUiBrowserSmoke.mts tests/basic/browser/audioLifecycleBrowserSmoke.mts \
             tests/basic/briefingAudioHealth.test.ts tests/real-game/browser/briefingAudioHealth.ts \
             tests/real-game/browser/ra2BrowserSmoke.mts

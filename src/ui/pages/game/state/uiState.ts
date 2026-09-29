@@ -8,7 +8,14 @@ import type { RuntimeToolbarView } from '../components/RuntimeToolbarView';
 import { createStore } from '../../../shared/state/store';
 
 export const toolbarState = createStore<ComponentProps<typeof RuntimeToolbarView> | null>(null);
-export const controlsCollapsed = createStore(false);
+export function shouldStartWithCompactControls(host: { platform: string; version: number } | undefined): boolean {
+  return host?.platform === 'ios' && host.version === 1;
+}
+const initialHost =
+  typeof window === 'undefined'
+    ? undefined
+    : (window as Window & { __RA2Host?: { platform: string; version: number } }).__RA2Host;
+export const controlsCollapsed = createStore(shouldStartWithCompactControls(initialHost));
 export const upscaleStatus = createStore<string | null>(null);
 export const debugVisible = createStore(false);
 export const debugState = createStore<ComponentProps<typeof DebugPanel> | null>(null);

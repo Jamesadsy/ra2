@@ -53,3 +53,13 @@ describe('声明式 UI 状态服务', () => {
     expect(mapRequest.getSnapshot()).toBeNull();
   });
 });
+
+describe('iOS runtime controls initial state', () => {
+  it('starts compact only for the versioned native iOS host', async () => {
+    const { shouldStartWithCompactControls } = await import('../../src/ui/pages/game/state/uiState');
+    expect(shouldStartWithCompactControls({ platform: 'ios', version: 1 })).toBe(true);
+    expect(shouldStartWithCompactControls(undefined)).toBe(false);
+    expect(shouldStartWithCompactControls({ platform: 'browser', version: 1 })).toBe(false);
+    expect(shouldStartWithCompactControls({ platform: 'ios', version: 2 })).toBe(false);
+  });
+});
