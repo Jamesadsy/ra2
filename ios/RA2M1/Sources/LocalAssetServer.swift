@@ -69,7 +69,8 @@ final class LocalAssetServer {
     }
 
     static func resolve(target: String, webRoot: URL, ownerDataRoot: URL) -> LocalAssetRoute {
-        guard target.hasPrefix("/"), !target.hasPrefix("//"),
+        let rawPath = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        guard target.hasPrefix("/"), !target.hasPrefix("//"), hasValidPercentEscapes(in: rawPath),
               let components = URLComponents(string: "http://127.0.0.1\(target)"),
               let decodedPath = components.percentEncodedPath.removingPercentEncoding,
               !decodedPath.contains("\\"), !decodedPath.contains("\0") else {
@@ -358,6 +359,26 @@ final class LocalAssetServer {
 
     private static func safeComponents(_ components: [String]) -> Bool {
         components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains("\0") }
+    }
+
+    private static func hasValidPercentEscapes(in path: Substring) -> Bool {
+        let bytes = Array(path.utf8)
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == 0x25 else {
+                index += 1
+                continue
+            }
+            guard index + 2 < bytes.count, isAsciiHexDigit(bytes[index + 1]), isAsciiHexDigit(bytes[index + 2]) else {
+                return false
+            }
+            index += 3
+        }
+        return true
+    }
+
+    private static func isAsciiHexDigit(_ byte: UInt8) -> Bool {
+        (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x46) || (byte >= 0x61 && byte <= 0x66)
     }
 
     private static func append(_ components: [String], to root: URL) -> URL {

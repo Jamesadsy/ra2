@@ -82,6 +82,9 @@ final class LocalAssetServerTests: XCTestCase {
             "/game/%00secret",
             "/game\\secret",
             "/game/%zz",
+            "/game/%",
+            "/game/%2",
+            "/game/%GG",
             "//game/game.exe",
         ] {
             XCTAssertEqual(LocalAssetServer.resolve(target: target, webRoot: root, ownerDataRoot: root), .badRequest, target)
