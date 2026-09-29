@@ -4,11 +4,11 @@ CnC RA2 is a native iPhoneOS ARM64 app that hosts the public Route B runtime in 
 
 ## Files-visible owner data
 
-On first launch, the native host creates `Documents/CnC RA2/Data` and `Documents/CnC RA2/User` so both appear in Files. `Data` accepts a flat, exact ten-file RA2 M1 device set and verifies the accepted EA 1.08 `game.exe` SHA-256 (`6fc4b410f8841ba3ad6c57b59fccae65f58a8871d86750af3c1e2d5a7c5ad39d`). The host reads owner data from `Data` in place. It does not recursively import a desktop installation into hidden Application Support, and it does not download or bundle proprietary replacements. Unknown, nested, partial, or wrong-executable sets fail closed.
+On first launch, the native host creates `Documents/CnC RA2/Data` and `Documents/CnC RA2/User` so both appear in Files. `Data` accepts a flat, exact eleven-file RA2 M1 device set, including `Maps01.mix` and `Maps02.mix` for the Allied and Soviet campaigns, and verifies the accepted EA 1.08 `game.exe` SHA-256 (`6fc4b410f8841ba3ad6c57b59fccae65f58a8871d86750af3c1e2d5a7c5ad39d`). The host reads owner data from `Data` in place. It does not recursively import a desktop installation into hidden Application Support, and it does not download or bundle proprietary replacements. Unknown, nested, partial, or wrong-executable sets fail closed.
 
 `User` is a separate Files-visible location for user-owned writable files. Route B's existing save/config/cache behavior remains in the app's persistent WKWebView IndexedDB store; retail inputs are served read-only from `Data`. The app has no iCloud dependency.
 
-The proven private XPS device stage contains exactly 10 files and 1,101,598,873 bytes. The full 668-file desktop installation is not the phone Data payload. The local XPS helper copies only the approved device allowlist and validates every file hash, byte length, and the EA 1.08 executable digest before producing a transfer-ready `Data` folder.
+The proven private XPS device stage contains exactly 11 files and 1,104,769,197 bytes. It retains the original ten files unchanged and adds only the verified Soviet campaign archive. The full 668-file desktop installation is not the phone Data payload. The local XPS helper copies only the approved device allowlist and validates every file hash, byte length, and the EA 1.08 executable digest before producing a transfer-ready `Data` folder.
 
 ## Managed iPhoneOS proof
 

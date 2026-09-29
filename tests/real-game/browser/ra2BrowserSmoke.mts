@@ -157,7 +157,7 @@ async function expectShellPage(page: Page, expected: string, timeout: number): P
   );
 }
 
-/** A private ten-file stage contains only RA2, so the shell auto-launches it instead of showing a game chooser. */
+/** A private RA2 owner-data stage contains only RA2, so the shell auto-launches it instead of showing a game chooser. */
 async function chooseLocalGameIfPrompted(page: Page, canvas: Locator, gameIndex: number): Promise<void> {
   const deadline = Date.now() + 30_000;
   const choices = page.locator('.detected-games button');

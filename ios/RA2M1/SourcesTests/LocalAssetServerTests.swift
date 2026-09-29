@@ -24,12 +24,15 @@ final class LocalAssetServerTests: XCTestCase {
     }
 
     func testOwnerFilenameResolverUsesActualCasingWithoutFilesystemAssumptions() {
-        let physicalNames = ["MAPS01.MIX", "MOVIES01.MIX", "unaccepted.mix"]
+        let physicalNames = ["MAPS01.MIX", "MAPS02.MIX", "MOVIES01.MIX", "unaccepted.mix"]
         XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "maps01.mix", actualNames: physicalNames), "MAPS01.MIX")
         XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "Maps01.mix", actualNames: physicalNames), "MAPS01.MIX")
+        XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "maps02.mix", actualNames: physicalNames), "MAPS02.MIX")
+        XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "Maps02.mix", actualNames: physicalNames), "MAPS02.MIX")
         XCTAssertEqual(LocalAssetServer.resolveOwnerFileName(requestedName: "movies01.mix", actualNames: physicalNames), "MOVIES01.MIX")
         XCTAssertNil(LocalAssetServer.resolveOwnerFileName(requestedName: "unaccepted.mix", actualNames: physicalNames))
         XCTAssertNil(LocalAssetServer.resolveOwnerFileName(requestedName: "maps01.mix", actualNames: ["Maps01.mix", "MAPS01.MIX"]))
+        XCTAssertNil(LocalAssetServer.resolveOwnerFileName(requestedName: "maps02.mix", actualNames: ["Maps02.mix", "MAPS02.MIX"]))
     }
 
     func testRootAndScopedOwnerRoutesResolveDivergentPhysicalCase() throws {
@@ -39,6 +42,7 @@ final class LocalAssetServerTests: XCTestCase {
         try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
         let fixtures: [(physicalName: String, bytes: Data, requests: [String])] = [
             ("MAPS01.MIX", Data("maps-fixture".utf8), ["/game/maps01.mix", "/game/Maps01.mix", "/game/ra2/maps01.mix"]),
+            ("MAPS02.MIX", Data("soviet-maps-fixture".utf8), ["/game/maps02.mix", "/game/Maps02.mix", "/game/ra2/maps02.mix"]),
             ("MOVIES01.MIX", Data("movies-fixture".utf8), ["/game/movies01.mix", "/game/ra2/movies01.mix"]),
         ]
         for fixture in fixtures {
@@ -63,8 +67,8 @@ final class LocalAssetServerTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/maps02.mix", webRoot: root, ownerDataRoot: data), .badRequest)
-        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/maps02.mix", webRoot: root, ownerDataRoot: data), .badRequest)
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/unknown.mix", webRoot: root, ownerDataRoot: data), .badRequest)
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/unknown.mix", webRoot: root, ownerDataRoot: data), .badRequest)
     }
 
     func testEncodedAndPlainTraversalAreRejected() {
@@ -111,6 +115,8 @@ final class LocalAssetServerTests: XCTestCase {
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/game.exe?token=private"), "owner/game.exe")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/maps01.mix?token=private"), "owner/maps01.mix")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/ra2/maps01.mix?token=private"), "owner/maps01.mix")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/maps02.mix?token=private"), "owner/maps02.mix")
+        XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/ra2/maps02.mix?token=private"), "owner/maps02.mix")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/ra2/game.exe?token=private"), "owner/game.exe")
         XCTAssertEqual(LocalAssetServer.diagnosticRoute(target: "/game/User/LastLaunchDiagnostics.txt"), "owner/other")
     }

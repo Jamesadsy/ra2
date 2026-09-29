@@ -8,7 +8,7 @@ import { reportNativeRuntimePhase } from './nativeDiagnostics';
 
 export const EA108_RA2_EXECUTABLE_SHA256 = '6fc4b410f8841ba3ad6c57b59fccae65f58a8871d86750af3c1e2d5a7c5ad39d';
 
-/** Files needed for the original RA2 frontend, Allied campaign map, briefing media, and music. */
+/** Files needed for the original RA2 frontend, both campaign maps, briefing media, and music. */
 export const EA108_RA2_M1_REQUIRED_FILES = [
   'game.exe',
   'ra2.mix',
@@ -16,6 +16,7 @@ export const EA108_RA2_M1_REQUIRED_FILES = [
   'binkw32.dll',
   'blowfish.dll',
   'maps01.mix',
+  'maps02.mix',
   'movies01.mix',
   'movies02.mix',
   'multi.mix',

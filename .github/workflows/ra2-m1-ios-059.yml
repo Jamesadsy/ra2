@@ -8,6 +8,7 @@ on:
       - secondsun/ra2-m1-ios-061-data-user-stage
       - secondsun/ra2-m1-ios-066-physical-polish
       - secondsun/ra2-m1-ios-067-resolution-regression
+      - secondsun/ra2-m1-ios-068-soviet-maps02
   workflow_dispatch:
 
 permissions:

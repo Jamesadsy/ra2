@@ -10,6 +10,7 @@ enum OwnerDataContract {
         "BINKW32.DLL",
         "Blowfish.dll",
         "Maps01.mix",
+        "Maps02.mix",
         "movies01.mix",
         "movies02.mix",
         "Multi.mix",

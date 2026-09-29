@@ -46,6 +46,7 @@ describe('EA RA2 1.08 iOS owner-source gate', () => {
       'binkw32.dll',
       'blowfish.dll',
       'maps01.mix',
+      'maps02.mix',
       'movies01.mix',
       'movies02.mix',
       'multi.mix',
@@ -53,12 +54,14 @@ describe('EA RA2 1.08 iOS owner-source gate', () => {
     ]);
   });
 
-  it('fails closed when a campaign-critical owner file is absent', async () => {
-    const provider = fixture(
-      new Uint8Array([0x4d, 0x5a]),
-      EA108_RA2_M1_REQUIRED_FILES.filter((name) => name !== 'maps01.mix'),
-    );
-    await expect(createEa108OwnerGameSource(provider)).rejects.toThrow(/maps01\.mix/);
+  it('fails closed when either campaign map archive is absent', async () => {
+    for (const missing of ['maps01.mix', 'maps02.mix']) {
+      const provider = fixture(
+        new Uint8Array([0x4d, 0x5a]),
+        EA108_RA2_M1_REQUIRED_FILES.filter((name) => name !== missing),
+      );
+      await expect(createEa108OwnerGameSource(provider)).rejects.toThrow(new RegExp(missing.replace('.', '\\.')));
+    }
   });
 
   it('fails closed for any executable other than the exact accepted EA 1.08 bytes', async () => {

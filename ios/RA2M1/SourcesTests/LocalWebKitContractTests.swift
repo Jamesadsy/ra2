@@ -176,6 +176,7 @@ final class LocalWebKitContractTests: XCTestCase {
             let physicalName: String
             switch name.lowercased() {
             case "maps01.mix": physicalName = "MAPS01.MIX"
+            case "maps02.mix": physicalName = "MAPS02.MIX"
             case "movies01.mix": physicalName = "MOVIES01.MIX"
             default: physicalName = name
             }
@@ -257,6 +258,9 @@ final class LocalWebKitContractTests: XCTestCase {
             "/game/maps01.mix",
             "/game/Maps01.mix",
             "/game/ra2/maps01.mix",
+            "/game/maps02.mix",
+            "/game/Maps02.mix",
+            "/game/ra2/maps02.mix",
             "/game/movies01.mix",
             "/game/ra2/movies01.mix",
         ]
@@ -269,12 +273,12 @@ final class LocalWebKitContractTests: XCTestCase {
             XCTAssertEqual(bytes, Data([0x01, 0x02]), path)
         }
 
-        let mapsURL = try XCTUnwrap(URL(string: "/game/maps01.mix", relativeTo: server.origin)?.absoluteURL)
+        let mapsURL = try XCTUnwrap(URL(string: "/game/maps02.mix", relativeTo: server.origin)?.absoluteURL)
         let (_, unauthorizedMapsResponse) = try await URLSession.shared.data(from: mapsURL)
         XCTAssertEqual((unauthorizedMapsResponse as? HTTPURLResponse)?.statusCode, 404)
 
         let (_, unknownScopedResponse) = try await URLSession.shared.data(
-            from: try XCTUnwrap(URL(string: "/game/ra2/maps02.mix", relativeTo: server.origin)?.absoluteURL)
+            from: try XCTUnwrap(URL(string: "/game/ra2/unknown.mix", relativeTo: server.origin)?.absoluteURL)
         )
         XCTAssertEqual((unknownScopedResponse as? HTTPURLResponse)?.statusCode, 400)
     }

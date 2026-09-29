@@ -6,8 +6,9 @@ import XCTest
 final class OwnerDataStoreTests: XCTestCase {
     func testAcceptedExecutablePinAndFlatDeviceAllowlist() {
         XCTAssertEqual(OwnerDataContract.executableSHA256, "6fc4b410f8841ba3ad6c57b59fccae65f58a8871d86750af3c1e2d5a7c5ad39d")
-        XCTAssertEqual(OwnerDataContract.requiredFiles.count, 10)
-        XCTAssertEqual(Set(OwnerDataContract.requiredFiles.map { $0.lowercased() }).count, 10)
+        XCTAssertEqual(OwnerDataContract.requiredFiles.count, 11)
+        XCTAssertEqual(Set(OwnerDataContract.requiredFiles.map { $0.lowercased() }).count, 11)
+        XCTAssertTrue(OwnerDataContract.requiredFiles.contains("Maps02.mix"))
     }
 
     func testSetupCreatesFilesVisibleDataAndSeparateUserFolders() throws {
@@ -56,6 +57,18 @@ final class OwnerDataStoreTests: XCTestCase {
 
         XCTAssertThrowsError(try OwnerDataStore.validate(folder: partial, expectedExecutableSHA256: "unused")) { error in
             XCTAssertEqual(error as? OwnerDataError, .missingFiles(Array(OwnerDataContract.requiredFiles.dropFirst())))
+        }
+    }
+
+    func testSovietCampaignArchiveIsRequired() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanUp(directory) }
+        let data = directory.appendingPathComponent("Data", isDirectory: true)
+        let bytes = try makeValidOwnerFolder(at: data)
+        try FileManager.default.removeItem(at: data.appendingPathComponent("Maps02.mix"))
+
+        XCTAssertThrowsError(try OwnerDataStore.validate(folder: data, expectedExecutableSHA256: digest(bytes))) { error in
+            XCTAssertEqual(error as? OwnerDataError, .missingFiles(["Maps02.mix"]))
         }
     }
 
