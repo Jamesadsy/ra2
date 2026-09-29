@@ -18,7 +18,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
     private var observers: [NSObjectProtocol] = []
     private var startup = RuntimeStartupState()
     private var ownerDataToken: String?
-    private var startupTimeout: DispatchWorkItem?
+    private let startupTimeout = RuntimeStartupTimeoutScheduler()
     private var lastNativeMetrics = ""
 
     override func viewDidLoad() {
@@ -34,7 +34,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
 
     deinit {
-        startupTimeout?.cancel()
+        startupTimeout.cancel()
         observers.forEach(NotificationCenter.default.removeObserver)
         server?.stop()
     }
@@ -131,8 +131,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
     }
 
     private func beginLaunch() {
-        startupTimeout?.cancel()
-        startupTimeout = nil
+        startupTimeout.cancel()
         removeWebView()
         server?.stop()
         server = nil
@@ -339,19 +338,15 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
         case .running:
             break
         case .inactive, .awaitingTap, .completed:
-            startupTimeout?.cancel()
-            startupTimeout = nil
+            startupTimeout.cancel()
         }
     }
 
     private func armStartupTimeout() {
-        startupTimeout?.cancel()
-        let timeout = DispatchWorkItem { [weak self] in
+        startupTimeout.arm { [weak self] in
             guard let self, self.startup.timeoutMode == .running else { return }
             self.showFailure(kind: "startup", message: self.startup.timeoutMessage, record: true)
         }
-        startupTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 180, execute: timeout)
     }
 
     private func recordBridgeEvent(_ event: String) {
@@ -402,8 +397,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
     }
 
     private func showFailure(kind: String, message: String, record: Bool) {
-        startupTimeout?.cancel()
-        startupTimeout = nil
+        startupTimeout.cancel()
         if record { diagnostics.recordError(event: kind, message: message) }
         let visible = RuntimeDiagnosticsLog.sanitize(message, secret: ownerDataToken, limit: 900)
         RuntimeStartupOverlayHandoff.showNativeStatus(statusSurface: statusSurface, in: view)

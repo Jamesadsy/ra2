@@ -36,6 +36,31 @@ enum RuntimeStartupTimeoutMode: Equatable {
     case completed
 }
 
+final class RuntimeStartupTimeoutScheduler {
+    static let defaultInterval: TimeInterval = 180
+
+    private let queue: DispatchQueue
+    private let interval: TimeInterval
+    private var workItem: DispatchWorkItem?
+
+    init(queue: DispatchQueue = .main, interval: TimeInterval = defaultInterval) {
+        self.queue = queue
+        self.interval = interval
+    }
+
+    func arm(_ action: @escaping () -> Void) {
+        cancel()
+        let workItem = DispatchWorkItem(block: action)
+        self.workItem = workItem
+        queue.asyncAfter(deadline: .now() + interval, execute: workItem)
+    }
+
+    func cancel() {
+        workItem?.cancel()
+        workItem = nil
+    }
+}
+
 struct RuntimeStartupState: Equatable {
     private(set) var acknowledged: Set<RuntimeStartupPhase> = []
     private(set) var lastAcknowledged: RuntimeStartupPhase?

@@ -63,6 +63,30 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(RuntimeStartupPhase.bridgePhase("firstGameFrameObserved"), .firstGameFrameObserved)
     }
 
+    func testStartupTimeoutIsPausedRearmedAndCancelledOnFirstFrame() async {
+        XCTAssertEqual(RuntimeStartupTimeoutScheduler.defaultInterval, 180)
+        let queue = DispatchQueue(label: "RA2M1Tests.startup-timeout")
+        let scheduler = RuntimeStartupTimeoutScheduler(queue: queue, interval: 0.02)
+
+        let pausedTimeout = expectation(description: "Tap-to-Start wait does not fire the startup timer")
+        pausedTimeout.isInverted = true
+        scheduler.arm { pausedTimeout.fulfill() }
+        // tapToStartReady moves RuntimeStartupState to awaitingTap; HostViewController cancels here.
+        scheduler.cancel()
+        await fulfillment(of: [pausedTimeout], timeout: 0.08)
+
+        let rearmedTimeout = expectation(description: "A post-acceptance VM startup stall reaches failure")
+        scheduler.arm { rearmedTimeout.fulfill() }
+        await fulfillment(of: [rearmedTimeout], timeout: 0.5)
+
+        let firstFrameTimeout = expectation(description: "First game frame cancels the final startup timer")
+        firstFrameTimeout.isInverted = true
+        scheduler.arm { firstFrameTimeout.fulfill() }
+        // firstGameFrameObserved moves RuntimeStartupState to completed; HostViewController cancels here.
+        scheduler.cancel()
+        await fulfillment(of: [firstFrameTimeout], timeout: 0.08)
+    }
+
     func testTapGateHandoffReleasesOnlyTheNativeBlockerAndFailureCanRestoreIt() {
         let container = UIView()
         let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
