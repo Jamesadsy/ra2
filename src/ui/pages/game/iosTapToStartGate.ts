@@ -1,5 +1,11 @@
 import type { VmShell } from '../../../adapter/vmShell';
-import { reportNativeRuntimeMetrics } from '../../../platform/browser/nativeDiagnostics';
+import {
+  reportNativeRuntimeEvent,
+  reportNativeRuntimeMetrics,
+  reportNativeRuntimePhase,
+} from '../../../platform/browser/nativeDiagnostics';
+
+let activeGateCancel: (() => void) | null = null;
 
 export interface IosTapToStartGate {
   ready: Promise<boolean>;
@@ -13,6 +19,7 @@ export function createIosTapToStartGate(
   isCurrent: () => boolean,
   onStarted: () => void,
 ): IosTapToStartGate {
+  activeGateCancel?.();
   document.getElementById('ios-tap-to-start')?.remove();
   const surface = document.createElement('div');
   surface.id = 'ios-tap-to-start';
@@ -31,6 +38,7 @@ export function createIosTapToStartGate(
   const button = document.createElement('button');
   button.type = 'button';
   button.textContent = 'Tap to Start';
+  button.disabled = false;
   const status = document.createElement('p');
   status.className = 'ios-tap-start-status';
   status.setAttribute('aria-live', 'polite');
@@ -49,16 +57,20 @@ export function createIosTapToStartGate(
     settled = true;
     button.removeEventListener('click', startFromGesture);
     surface.remove();
+    if (activeGateCancel === cancel) activeGateCancel = null;
     settle(result);
   };
+  const cancel = (): void => cleanup(false);
   const startFromGesture = async (): Promise<void> => {
     if (settled || busy) return;
     busy = true;
     button.disabled = true;
     status.textContent = 'Enabling audio…';
+    let audioUnlockReported = false;
     try {
       // Calling this before the first await keeps AudioContext.resume() within this trusted WebView click.
-      const audio = await vm.unlockAudioForStart();
+      const audioUnlock = vm.unlockAudioForStart();
+      const audio = await audioUnlock;
       const workletReady = !audio.audioWorkletSupported || audio.audioWorkletModuleLoaded === true;
       const unlocked = audio.unlockResult === true && audio.contextState === 'running' && workletReady;
       reportNativeRuntimeMetrics({
@@ -74,23 +86,41 @@ export function createIosTapToStartGate(
         audioWorkletCount: audio.workletCount,
         audioLiveProcessorCount: audio.liveProcessorCount,
       });
+      reportNativeRuntimeEvent(unlocked ? 'tap-to-start audio unlock passed' : 'tap-to-start audio unlock failed');
+      audioUnlockReported = true;
       if (!isCurrent()) {
         cleanup(false);
         return;
       }
       if (!unlocked) throw new Error('Audio could not start. Tap to retry.');
       onStarted();
+      reportNativeRuntimeEvent('tap-to-start user gesture accepted');
+      reportNativeRuntimePhase('tapToStartAccepted');
       cleanup(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       status.textContent = message.slice(0, 120);
       button.disabled = false;
       busy = false;
+      if (!audioUnlockReported) reportNativeRuntimeEvent('tap-to-start audio unlock failed');
       reportNativeRuntimeMetrics({ event: 'ios-audio-gate', gatePhase: 'unlock-failed', error: message.slice(0, 120) });
     }
   };
   button.addEventListener('click', startFromGesture);
+  const host = canvas.closest('#screen-frame') ?? canvas.parentElement ?? document.body;
+  host.append(surface);
   button.focus();
 
-  return { ready, cancel: () => cleanup(false) };
+  // The native host may expose this surface only after this phase arrives, so install the handler and
+  // verify the live, enabled DOM node before announcing that it can receive the trusted click.
+  if (!surface.isConnected || !button.isConnected || button.disabled || !isCurrent()) {
+    cancel();
+    return { ready, cancel };
+  }
+  activeGateCancel = cancel;
+  reportNativeRuntimeEvent('tap-to-start DOM created');
+  reportNativeRuntimeEvent('tap-to-start gate-ready emitted');
+  reportNativeRuntimePhase('tapToStartReady');
+
+  return { ready, cancel };
 }

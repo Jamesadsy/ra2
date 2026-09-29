@@ -35,7 +35,7 @@ it('统一 CI 入口使用固定 action 与 pnpm，格式和无素材验收归 B
 it('Apple proof is pinned to the implementation branch and builds a source-only unsigned iPhoneOS arm64 artifact', () => {
   expect(apple).toContain('- secondsun/ra2-m1-ios-061-data-user-stage');
   expect(appleProofVerifier).toContain(
-    "process.env.RA2_EXPECTED_SOURCE_BRANCH ?? 'secondsun/ra2-m1-ios-066-physical-polish'",
+    "process.env.RA2_EXPECTED_SOURCE_BRANCH ?? 'secondsun/ra2-m1-ios-069-tap-start-handoff'",
   );
   expect(apple).toContain(
     'RA2_EXPECTED_SOURCE_BRANCH="$GITHUB_REF_NAME" node scripts/ios/verifyAppleApp.mjs "$APP" "$OUTPUT"',

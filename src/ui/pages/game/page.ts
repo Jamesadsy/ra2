@@ -596,8 +596,12 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           const gate = createIosTapToStartGate(canvas, shell, isCurrent, () => setHostImmersiveMode(true));
           const cancelGate = gate.cancel;
           activeTapStartCleanup = cancelGate;
-          await gate.ready;
+          const accepted = await gate.ready;
           if (activeTapStartCleanup === cancelGate) activeTapStartCleanup = null;
+          if (!accepted) {
+            await shell.destroy();
+            return null;
+          }
           return shell;
         });
       }),

@@ -31,6 +31,7 @@ const PRESENTATION_ONLY = process.env.RA2_BROWSER_PRESENTATION_ONLY === '1';
 const LIFECYCLE_ONLY = process.env.RA2_BROWSER_LIFECYCLE_ONLY === '1';
 const CAMPAIGN_SELECTION_ONLY = process.env.RA2_BROWSER_CAMPAIGN_SELECTION_ONLY === '1';
 const CAMPAIGN_CHOICE = process.env.RA2_BROWSER_CAMPAIGN_CHOICE;
+const CAMPAIGN_ENTRY_PROOF_ONLY = process.env.RA2_BROWSER_CAMPAIGN_ENTRY_PROOF_ONLY === '1';
 const SKIP_BRIEFING_WITH_LONG_PRESS = process.env.RA2_BROWSER_SKIP_BRIEFING === '1';
 const GAME_LABEL = GAME_ID === 'yr' ? 'RA2YR' : 'RA2';
 const EXECUTABLE = GAME_ID === 'yr' ? 'gamemd.exe' : 'game.exe';
@@ -931,6 +932,7 @@ try {
     viewport: { width: 1440, height: 1000 },
     ignoreHTTPSErrors: true,
   });
+  await context.addInitScript('globalThis.__name ??= (fn) => fn;');
   await context.addInitScript(
     ({ gameId, iosHost, initialResolution, captureWebGl, captureGuestFrames }) => {
       if (captureGuestFrames) {
@@ -1013,7 +1015,44 @@ try {
       else if (initialResolution) localStorage.setItem(`vm-resolution-${gameId}`, initialResolution);
       localStorage.removeItem('vm-clock-rate');
       if (iosHost) {
-        window.__RA2Host = { platform: 'ios', version: 1, ownerDataToken: 'asset-free-test-capability' };
+        const target = window as Window & {
+          __RA2Host?: { platform: 'ios'; version: 1; ownerDataToken: string };
+          __RA2TestNativeRows?: Array<Record<string, unknown>>;
+          __RA2NativeDiagnostics?: Record<string, (...args: never[]) => void>;
+        };
+        target.__RA2Host = { platform: 'ios', version: 1, ownerDataToken: 'private-local-test-capability' };
+        target.__RA2TestNativeRows = [];
+        const rows = target.__RA2TestNativeRows;
+        target.__RA2NativeDiagnostics = {
+          phase: (phase: string) => {
+            rows.push({ kind: 'phase', phase });
+            if (phase === 'tapToStartReady') {
+              const surface = document.getElementById('ios-tap-to-start');
+              const button = surface?.querySelector('button');
+              rows.push({
+                kind: 'tapToStartReadyDOM',
+                surfaceConnected: surface?.isConnected === true,
+                buttonConnected: button?.isConnected === true,
+                buttonEnabled: button instanceof HTMLButtonElement && !button.disabled,
+                gateCount: document.querySelectorAll('#ios-tap-to-start').length,
+              });
+            }
+          },
+          error: (event: string, message: string) =>
+            rows.push({ kind: 'error', event, message: message.slice(0, 160) }),
+          event: (event: string) => rows.push({ kind: 'event', event }),
+          metrics: (record: Record<string, unknown>) => rows.push({ kind: 'metrics', ...record }),
+          touch: (record: Record<string, unknown>) => rows.push({ kind: 'touch', event: record.event }),
+        } as unknown as typeof target.__RA2NativeDiagnostics;
+        document.addEventListener(
+          'click',
+          (event) => {
+            if ((event.target as Element | null)?.closest?.('#ios-tap-to-start')) {
+              rows.push({ kind: 'tapToStartClick', trusted: event.isTrusted });
+            }
+          },
+          true,
+        );
       }
     },
     {
@@ -1088,6 +1127,7 @@ try {
     const tapToStart = page.locator('#ios-tap-to-start');
     await tapToStart.waitFor({ state: 'visible', timeout: 30_000 });
     assert.equal(await tapToStart.count(), 1, 'iOS WebView must show exactly one Tap to Start gate');
+    assert.equal(await tapToStart.locator('button').isEnabled(), true, 'Tap to Start button must be enabled');
     await tapToStart.locator('button').click();
     await tapToStart.waitFor({ state: 'detached', timeout: 10_000 }).catch(async (error: unknown) => {
       const detail = await tapToStart
@@ -1105,6 +1145,50 @@ try {
 
   const problem = page.locator('h3').filter({ hasText: /运行错误|接口待实现/ });
   await expectShellPage(page, 'mainmenu', 60_000);
+  if (TAP_TO_START) {
+    const startup = await page.evaluate(() => {
+      const rows =
+        (window as Window & { __RA2TestNativeRows?: Array<Record<string, unknown>> }).__RA2TestNativeRows ?? [];
+      const phases = rows.filter((row) => row.kind === 'phase').map((row) => row.phase);
+      const required = [
+        'ownerGameSourceValidated',
+        'tapToStartReady',
+        'tapToStartAccepted',
+        'vmStartupEntered',
+        'firstGameFrameObserved',
+      ];
+      return {
+        rows,
+        phases,
+        requiredIndexes: required.map((phase) => phases.indexOf(phase)),
+        readyDOM: rows.find((row) => row.kind === 'tapToStartReadyDOM'),
+        trustedClick: rows.find((row) => row.kind === 'tapToStartClick')?.trusted,
+        audio: rows.find((row) => row.kind === 'metrics' && row.event === 'ios-audio-gate'),
+      };
+    });
+    assert(
+      startup.requiredIndexes.every((index) => index >= 0),
+      `iOS startup phases missing: ${JSON.stringify(startup)}`,
+    );
+    assert(
+      startup.requiredIndexes.every((index, position, indexes) => position === 0 || indexes[position - 1]! < index),
+      `iOS startup phases are out of order: ${JSON.stringify(startup.phases)}`,
+    );
+    assert.deepEqual(startup.readyDOM, {
+      kind: 'tapToStartReadyDOM',
+      surfaceConnected: true,
+      buttonConnected: true,
+      buttonEnabled: true,
+      gateCount: 1,
+    });
+    assert.equal(startup.trustedClick, true, 'Tap to Start must use a trusted WebView DOM click');
+    assert.equal(startup.audio?.audioUnlockResult, 1, 'Tap-to-Start did not unlock WebAudio');
+    assert.equal(startup.audio?.audioContextState, 'running', 'Tap-to-Start AudioContext did not reach running state');
+    if (startup.audio?.audioWorkletSupported === 1) {
+      assert.equal(startup.audio.audioWorkletModuleLoaded, 1, 'Tap-to-Start AudioWorklet did not finish preparation');
+    }
+    console.log(`🔬 Native/Web startup handoff: ${JSON.stringify(startup)}`);
+  }
   await waitForQuietFileReads(page, canvas);
   await waitForBinkOpen(page, 0, '首次主菜单');
   assert.equal(
@@ -1274,6 +1358,38 @@ try {
           `movie=${await canvas.getAttribute('data-movie-playback-state')}; ` +
           `battlefield=${await canvas.getAttribute('data-vm-battlefield')}; frame=${await canvas.getAttribute('data-vm-frame')}; ` +
           `status=${await canvas.getAttribute('data-vm-status')}; bink=${await canvas.getAttribute('data-vm-bink-calls')}`,
+      );
+    }
+    if (CAMPAIGN_ENTRY_PROOF_ONLY) {
+      assert.equal(CAMPAIGN_CHOICE, 'allied', 'private entry proof is scoped to the Allied campaign');
+      await page.waitForFunction(
+        () => document.querySelector<HTMLCanvasElement>('#screen')?.dataset.moviePlayback === 'skippable-briefing',
+        undefined,
+        { timeout: 30_000 },
+      );
+      const binkCloseBeforeSkip =
+        callsOf(await canvas.getAttribute('data-vm-bink-calls'))['BINKW32.DLL!_BinkClose@4'] ?? 0;
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(
+        (before) => {
+          const calls = JSON.parse(
+            document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmBinkCalls ?? '{}',
+          ) as Record<string, number>;
+          return (calls['BINKW32.DLL!_BinkClose@4'] ?? 0) > before;
+        },
+        binkCloseBeforeSkip,
+        { timeout: 30_000 },
+      );
+      console.log('🔬 private Allied campaign: original Esc briefing skip advanced the guest');
+      const playable = await waitForPlayableBattle(page, canvas, 90_000);
+      const frameBefore = Number((await canvas.getAttribute('data-vm-frame')) ?? 0);
+      await page.waitForTimeout(10_000);
+      const frameAfter = Number((await canvas.getAttribute('data-vm-frame')) ?? 0);
+      assert(frameBefore > 0 && frameAfter > frameBefore, 'Allied campaign battlefield frames did not continue');
+      assert.equal(await problem.count(), 0, 'Allied campaign entry produced a runtime failure');
+      assert.deepEqual(pageErrors, [], `Allied campaign entry browser errors: ${pageErrors.join('\n')}`);
+      console.log(
+        `🔬 private Allied campaign entry: playable=${JSON.stringify(playable.signal)} frames=${frameBefore}->${frameAfter} over 10s`,
       );
     }
     console.log(

@@ -142,11 +142,13 @@ final class LocalWebKitContractTests: XCTestCase {
         ) as? String
         XCTAssertEqual(hostInstalled, "ios:1:true")
 
-        let received = expectation(description: "phase, window error, unhandled rejection and bootstrap error reached native")
-        received.expectedFulfillmentCount = 4
+        let received = expectation(description: "startup phases, window error, unhandled rejection and bootstrap error reached native")
+        received.expectedFulfillmentCount = 6
         messages.onMessage = { received.fulfill() }
         _ = try await webView.evaluateJavaScript("""
           window.__RA2NativeDiagnostics.phase('ownerDataListingAcknowledged');
+          window.__RA2NativeDiagnostics.phase('tapToStartReady');
+          window.__RA2NativeDiagnostics.phase('tapToStartAccepted');
           window.dispatchEvent(new ErrorEvent('error', { message: 'synthetic-window-error' }));
           window.dispatchEvent(new Event('unhandledrejection'));
           window.__RA2NativeDiagnostics.error('bootstrap', 'synthetic-bootstrap-error', 'synthetic-stack');
@@ -154,7 +156,9 @@ final class LocalWebKitContractTests: XCTestCase {
           """)
         await fulfillment(of: [received], timeout: 10)
 
-        XCTAssertEqual(messages.bodies.compactMap { $0["phase"] as? String }.first, "ownerDataListingAcknowledged")
+        XCTAssertEqual(messages.bodies.compactMap { $0["phase"] as? String }, [
+            "ownerDataListingAcknowledged", "tapToStartReady", "tapToStartAccepted",
+        ])
         XCTAssertEqual(Set(messages.bodies.compactMap { $0["event"] as? String }), Set(["window", "unhandledrejection", "bootstrap"]))
     }
 

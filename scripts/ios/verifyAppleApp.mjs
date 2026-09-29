@@ -6,8 +6,8 @@ import { basename, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const base = process.env.ACCEPTED_BASE_SHA ?? '12dc7ec83224fa88d98e7d2086e80cc6a1d9e5e5';
-const expectedBranch = process.env.RA2_EXPECTED_SOURCE_BRANCH ?? 'secondsun/ra2-m1-ios-066-physical-polish';
+const base = process.env.ACCEPTED_BASE_SHA ?? 'f4d64eda23063fc98ad63bb0d56b0acd304d2f9a';
+const expectedBranch = process.env.RA2_EXPECTED_SOURCE_BRANCH ?? 'secondsun/ra2-m1-ios-069-tap-start-handoff';
 const [appPath, outputDirectory] = process.argv.slice(2).map((path) => resolve(path));
 if (!appPath || !outputDirectory) throw new Error('Usage: verifyAppleApp.mjs <RA2M1.app> <artifact-output-directory>');
 

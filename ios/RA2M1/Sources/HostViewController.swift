@@ -138,8 +138,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
         server = nil
         ownerDataToken = nil
         startup = RuntimeStartupState()
-        statusSurface.isHidden = false
-        statusSurface.isUserInteractionEnabled = true
+        RuntimeStartupOverlayHandoff.showNativeStatus(statusSurface: statusSurface, in: view)
         statusLabel.text = "Checking RA2 Data"
         progressLabel.text = startup.progressText
         checkDataButton.setTitle("Retry", for: .normal)
@@ -229,12 +228,6 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
         diagnostics.recordEvent("WebKit navigation started")
         setBusy("Loading the packaged public Route B runtime…")
         browser.load(URLRequest(url: origin))
-        let timeout = DispatchWorkItem { [weak self] in
-            guard let self, !self.startup.isReady else { return }
-            self.showFailure(kind: "startup", message: self.startup.timeoutMessage, record: true)
-        }
-        startupTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 180, execute: timeout)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -275,13 +268,15 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
         switch kind {
         case "phase":
             guard let name = body["phase"] as? String, let phase = RuntimeStartupPhase.bridgePhase(name) else { return }
-            acknowledge(phase)
+            if phase == .tapToStartReady && webView == nil {
+                diagnostics.recordEvent("Tap-to-Start ready ignored without WebView")
+                return
+            }
+            guard acknowledge(phase) else { return }
             if phase == .firstGameFrameObserved {
-                startupTimeout?.cancel()
-                startupTimeout = nil
-                statusSurface.isHidden = true
-                statusSurface.isUserInteractionEnabled = false
-                if let webView { view.bringSubviewToFront(webView) }
+                if let webView {
+                    RuntimeStartupOverlayHandoff.exposeTapToStart(statusSurface: statusSurface, webView: webView, in: view)
+                }
             }
         case "error":
             let event = body["event"] as? String ?? "runtime"
@@ -303,14 +298,60 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
         }
     }
 
-    private func acknowledge(_ phase: RuntimeStartupPhase) {
-        startup.acknowledge(phase)
+    @discardableResult
+    private func acknowledge(_ phase: RuntimeStartupPhase) -> Bool {
+        let previousTimeoutMode = startup.timeoutMode
+        guard startup.acknowledge(phase) else {
+            diagnostics.recordEvent("startup phase rejected: \(phase.rawValue)")
+            return false
+        }
         diagnostics.recordPhase(phase)
         statusLabel.text = phase.rawValue
         progressLabel.text = startup.progressText
         if phase != .firstGameFrameObserved {
             detailLabel.text = "Waiting for the next Route B startup phase. If startup stops, the current phase and error are saved in User/LastLaunchDiagnostics.txt."
         }
+        switch phase {
+        case .tapToStartReady:
+            diagnostics.recordEvent("tap-to-start gate-ready handoff received")
+            spinner.stopAnimating()
+            if let webView {
+                RuntimeStartupOverlayHandoff.exposeTapToStart(statusSurface: statusSurface, webView: webView, in: view)
+                diagnostics.recordEvent("native startup overlay released for Tap to Start")
+            }
+        case .tapToStartAccepted:
+            diagnostics.recordEvent("tap-to-start user gesture accepted")
+        case .vmStartupEntered:
+            diagnostics.recordEvent("VM startup entered")
+        case .firstGameFrameObserved:
+            diagnostics.recordEvent("first game frame observed")
+        default:
+            break
+        }
+        updateStartupTimeout(from: previousTimeoutMode)
+        return true
+    }
+
+    private func updateStartupTimeout(from previousMode: RuntimeStartupTimeoutMode) {
+        switch startup.timeoutMode {
+        case .running where previousMode != .running:
+            armStartupTimeout()
+        case .running:
+            break
+        case .inactive, .awaitingTap, .completed:
+            startupTimeout?.cancel()
+            startupTimeout = nil
+        }
+    }
+
+    private func armStartupTimeout() {
+        startupTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.startup.timeoutMode == .running else { return }
+            self.showFailure(kind: "startup", message: self.startup.timeoutMessage, record: true)
+        }
+        startupTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 180, execute: timeout)
     }
 
     private func recordBridgeEvent(_ event: String) {
@@ -320,6 +361,11 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
             "native viewport changed",
             "web pagehide",
             "runtime shutdown",
+            "tap-to-start DOM created",
+            "tap-to-start gate-ready emitted",
+            "tap-to-start audio unlock passed",
+            "tap-to-start audio unlock failed",
+            "tap-to-start user gesture accepted",
         ]
         if fixed.contains(event) {
             diagnostics.recordEvent(event)
@@ -360,8 +406,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
         startupTimeout = nil
         if record { diagnostics.recordError(event: kind, message: message) }
         let visible = RuntimeDiagnosticsLog.sanitize(message, secret: ownerDataToken, limit: 900)
-        statusSurface.isHidden = false
-        statusSurface.isUserInteractionEnabled = true
+        RuntimeStartupOverlayHandoff.showNativeStatus(statusSurface: statusSurface, in: view)
         statusLabel.text = "Runtime startup failed"
         detailLabel.text = "\(startup.lastAcknowledged?.rawValue ?? "Native launch")\n\(visible)\n\nSend User/LastLaunchDiagnostics.txt and the newest User/Debug and User/touchlog files to the Second Sun team."
         progressLabel.text = startup.progressText
@@ -371,8 +416,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
     }
 
     private func setBusy(_ detail: String) {
-        statusSurface.isHidden = false
-        statusSurface.isUserInteractionEnabled = true
+        RuntimeStartupOverlayHandoff.showNativeStatus(statusSurface: statusSurface, in: view)
         detailLabel.text = detail
         checkDataButton.isHidden = true
         spinner.startAnimating()

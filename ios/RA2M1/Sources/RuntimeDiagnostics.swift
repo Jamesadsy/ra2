@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import WebKit
 
 enum RuntimeStartupPhase: String, CaseIterable, Equatable {
@@ -9,6 +10,8 @@ enum RuntimeStartupPhase: String, CaseIterable, Equatable {
     case webHostBootstrapAcknowledged = "Web host bootstrap acknowledged"
     case ownerDataListingAcknowledged = "Owner Data listing acknowledged"
     case ownerGameSourceValidated = "Owner game source validated"
+    case tapToStartReady = "Tap-to-Start ready"
+    case tapToStartAccepted = "Tap-to-Start accepted"
     case vmStartupEntered = "VM startup entered"
     case firstGameFrameObserved = "First game frame observed"
 
@@ -17,6 +20,8 @@ enum RuntimeStartupPhase: String, CaseIterable, Equatable {
         case "webHostBootstrapAcknowledged": return .webHostBootstrapAcknowledged
         case "ownerDataListingAcknowledged": return .ownerDataListingAcknowledged
         case "ownerGameSourceValidated": return .ownerGameSourceValidated
+        case "tapToStartReady": return .tapToStartReady
+        case "tapToStartAccepted": return .tapToStartAccepted
         case "vmStartupEntered": return .vmStartupEntered
         case "firstGameFrameObserved": return .firstGameFrameObserved
         default: return nil
@@ -24,16 +29,35 @@ enum RuntimeStartupPhase: String, CaseIterable, Equatable {
     }
 }
 
+enum RuntimeStartupTimeoutMode: Equatable {
+    case inactive
+    case running
+    case awaitingTap
+    case completed
+}
+
 struct RuntimeStartupState: Equatable {
     private(set) var acknowledged: Set<RuntimeStartupPhase> = []
     private(set) var lastAcknowledged: RuntimeStartupPhase?
 
     var isReady: Bool { acknowledged.contains(.firstGameFrameObserved) }
-    var shouldHideStatusSurface: Bool { isReady }
+    var shouldHideStatusSurface: Bool { acknowledged.contains(.tapToStartReady) || isReady }
+    var timeoutMode: RuntimeStartupTimeoutMode {
+        if isReady { return .completed }
+        if acknowledged.contains(.tapToStartReady) && !acknowledged.contains(.tapToStartAccepted) {
+            return .awaitingTap
+        }
+        return acknowledged.contains(.mainNavigationStarted) ? .running : .inactive
+    }
 
-    mutating func acknowledge(_ phase: RuntimeStartupPhase) {
+    @discardableResult
+    mutating func acknowledge(_ phase: RuntimeStartupPhase) -> Bool {
+        guard RuntimeStartupPhase.allCases.first(where: { !acknowledged.contains($0) }) == phase else {
+            return false
+        }
         acknowledged.insert(phase)
         lastAcknowledged = phase
+        return true
     }
 
     mutating func beginRetry() {
@@ -50,6 +74,20 @@ struct RuntimeStartupState: Equatable {
     var timeoutMessage: String {
         let phase = lastAcknowledged?.rawValue ?? "native launch"
         return "Startup timed out after \(phase). Tap Retry to restart the local host. If it stops again, send User/LastLaunchDiagnostics.txt and the newest User/Debug and User/touchlog files."
+    }
+}
+
+enum RuntimeStartupOverlayHandoff {
+    static func exposeTapToStart(statusSurface: UIView, webView: WKWebView, in container: UIView) {
+        statusSurface.isUserInteractionEnabled = false
+        statusSurface.isHidden = true
+        container.bringSubviewToFront(webView)
+    }
+
+    static func showNativeStatus(statusSurface: UIView, in container: UIView) {
+        statusSurface.isHidden = false
+        statusSurface.isUserInteractionEnabled = true
+        container.bringSubviewToFront(statusSurface)
     }
 }
 
@@ -420,7 +458,7 @@ final class RuntimeDiagnosticsLog {
         if route.hasPrefix("owner/") {
             let name = String(route.dropFirst("owner/".count)).lowercased()
             let allowlist = Set(["game.exe", "ra2.mix", "language.mix", "binkw32.dll", "blowfish.dll",
-                                "maps01.mix", "movies01.mix", "movies02.mix", "multi.mix", "theme.mix"])
+                                "maps01.mix", "maps02.mix", "movies01.mix", "movies02.mix", "multi.mix", "theme.mix"])
             return allowlist.contains(name) ? "owner/\(name)" : ""
         }
         if route.hasPrefix("public/assets/") {

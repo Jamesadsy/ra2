@@ -7,7 +7,7 @@ export interface VmSessionStartContext {
 
 export type VmSessionShellFactory<T extends SessionRuntime = SessionRuntime> = (
   context: VmSessionStartContext,
-) => Promise<T>;
+) => Promise<T | null>;
 
 /**
  * Own the VM shell's asynchronous lifecycle independently of the page DOM.
@@ -23,13 +23,16 @@ export class VmSessionController {
     await this.destroyActive();
     if (!this.isCurrent(generation)) return null;
 
-    let shell: T;
+    let shell: T | null;
     try {
       shell = await factory({ isCurrent: () => this.isCurrent(generation) });
     } catch (error) {
       if (this.isCurrent(generation)) throw error;
       return null;
     }
+
+    // A gate or startup UI may cancel before a shell is handed to the active session.
+    if (!shell) return null;
 
     if (!this.isCurrent(generation)) {
       await this.destroyShell(shell);

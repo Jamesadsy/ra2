@@ -19,22 +19,69 @@ final class RuntimeLifecycleTests: XCTestCase {
 
     func testStartupReadinessWaitsForTheFirstGameFrame() {
         var startup = RuntimeStartupState()
-        startup.acknowledge(.dataValid)
-        startup.acknowledge(.localServerReady)
-        startup.acknowledge(.mainNavigationFinished)
-        startup.acknowledge(.webHostBootstrapAcknowledged)
+        XCTAssertEqual(startup.timeoutMode, .inactive)
+        XCTAssertTrue(startup.acknowledge(.dataValid))
+        XCTAssertTrue(startup.acknowledge(.localServerReady))
+        XCTAssertTrue(startup.acknowledge(.mainNavigationStarted))
+        XCTAssertEqual(startup.timeoutMode, .running)
+        XCTAssertTrue(startup.acknowledge(.mainNavigationFinished))
+        XCTAssertTrue(startup.acknowledge(.webHostBootstrapAcknowledged))
 
         XCTAssertFalse(startup.isReady)
         XCTAssertFalse(startup.shouldHideStatusSurface)
         XCTAssertTrue(startup.timeoutMessage.contains("Web host bootstrap acknowledged"))
 
-        startup.acknowledge(.ownerDataListingAcknowledged)
-        startup.acknowledge(.ownerGameSourceValidated)
-        startup.acknowledge(.vmStartupEntered)
+        XCTAssertTrue(startup.acknowledge(.ownerDataListingAcknowledged))
+        XCTAssertTrue(startup.acknowledge(.ownerGameSourceValidated))
         XCTAssertFalse(startup.shouldHideStatusSurface)
+        XCTAssertEqual(startup.timeoutMode, .running)
+        XCTAssertFalse(startup.acknowledge(.vmStartupEntered))
+        XCTAssertTrue(startup.acknowledge(.tapToStartReady))
+        XCTAssertTrue(startup.shouldHideStatusSurface)
+        XCTAssertEqual(startup.timeoutMode, .awaitingTap)
+        XCTAssertFalse(startup.isReady)
+        XCTAssertTrue(startup.acknowledge(.tapToStartAccepted))
+        XCTAssertEqual(startup.timeoutMode, .running)
+        XCTAssertTrue(startup.acknowledge(.vmStartupEntered))
         startup.acknowledge(.firstGameFrameObserved)
         XCTAssertTrue(startup.isReady)
         XCTAssertTrue(startup.shouldHideStatusSurface)
+        XCTAssertEqual(startup.timeoutMode, .completed)
+    }
+
+    func testStartupPhaseOrderRejectsDuplicatesAndOutOfOrderSignals() {
+        var startup = RuntimeStartupState()
+        XCTAssertFalse(startup.acknowledge(.tapToStartReady))
+        XCTAssertTrue(startup.acknowledge(.dataValid))
+        XCTAssertFalse(startup.acknowledge(.mainNavigationStarted))
+        XCTAssertTrue(startup.acknowledge(.localServerReady))
+        XCTAssertTrue(startup.acknowledge(.mainNavigationStarted))
+        XCTAssertFalse(startup.acknowledge(.mainNavigationStarted))
+
+        XCTAssertEqual(RuntimeStartupPhase.bridgePhase("tapToStartReady"), .tapToStartReady)
+        XCTAssertEqual(RuntimeStartupPhase.bridgePhase("tapToStartAccepted"), .tapToStartAccepted)
+        XCTAssertEqual(RuntimeStartupPhase.bridgePhase("firstGameFrameObserved"), .firstGameFrameObserved)
+    }
+
+    func testTapGateHandoffReleasesOnlyTheNativeBlockerAndFailureCanRestoreIt() {
+        let container = UIView()
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let statusSurface = UIView()
+        container.addSubview(webView)
+        container.addSubview(statusSurface)
+        XCTAssertTrue(container.subviews.last === statusSurface)
+        XCTAssertFalse(statusSurface.isHidden)
+        XCTAssertTrue(statusSurface.isUserInteractionEnabled)
+
+        RuntimeStartupOverlayHandoff.exposeTapToStart(statusSurface: statusSurface, webView: webView, in: container)
+        XCTAssertTrue(statusSurface.isHidden)
+        XCTAssertFalse(statusSurface.isUserInteractionEnabled)
+        XCTAssertTrue(container.subviews.last === webView)
+
+        RuntimeStartupOverlayHandoff.showNativeStatus(statusSurface: statusSurface, in: container)
+        XCTAssertFalse(statusSurface.isHidden)
+        XCTAssertTrue(statusSurface.isUserInteractionEnabled)
+        XCTAssertTrue(container.subviews.last === statusSurface)
     }
 
     func testDiagnosticFilesAreBoundedAndExcludeOwnerBytesAndCapabilityTokens() throws {
@@ -54,6 +101,7 @@ final class RuntimeLifecycleTests: XCTestCase {
         diagnostics.setOwnerDataToken(token)
         diagnostics.recordPhase(.dataValid)
         diagnostics.recordRoute("owner/game.exe", status: 206)
+        diagnostics.recordRoute("owner/maps02.mix", status: 206)
         diagnostics.recordError(
             event: "unhandledrejection",
             message: "ownerDataToken=\(token) https://127.0.0.1:18108/game/.list?token=hidden",
@@ -76,6 +124,7 @@ final class RuntimeLifecycleTests: XCTestCase {
 
         XCTAssertTrue(summary.contains("Data valid"))
         XCTAssertTrue(summary.contains("owner/game.exe  HTTP 206"))
+        XCTAssertTrue(summary.contains("owner/maps02.mix  HTTP 206"))
         XCTAssertTrue(debug.contains("unhandledrejection"))
         XCTAssertTrue(touch.contains("pointerdown"))
         for value in [summary, debug, touch] {
