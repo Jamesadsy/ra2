@@ -69,7 +69,8 @@ final class LocalAssetServer {
     }
 
     static func resolve(target: String, webRoot: URL, ownerDataRoot: URL) -> LocalAssetRoute {
-        guard let components = URLComponents(string: "http://127.0.0.1\(target)"),
+        guard target.hasPrefix("/"), !target.hasPrefix("//"),
+              let components = URLComponents(string: "http://127.0.0.1\(target)"),
               let decodedPath = components.percentEncodedPath.removingPercentEncoding,
               !decodedPath.contains("\\"), !decodedPath.contains("\0") else {
             return .badRequest
@@ -89,9 +90,13 @@ final class LocalAssetServer {
             }) {
                 return ownerFileRoute(requestedName: parts[1], ownerDataRoot: ownerDataRoot)
             }
-            guard parts.count >= 2, parts[1].caseInsensitiveCompare("ra2") == .orderedSame else { return .badRequest }
+            guard parts.count >= 2 else { return .notFound }
+            // User is a sibling custody root, never an owner-Data route. Keep rejecting it
+            // explicitly while safe, unknown guest asset probes remain ordinary misses.
+            if parts[1].caseInsensitiveCompare("user") == .orderedSame { return .badRequest }
+            guard parts[1].caseInsensitiveCompare("ra2") == .orderedSame else { return .notFound }
             if parts.count == 2 { return .directory(ownerDataRoot) }
-            guard parts.count == 3 else { return .badRequest }
+            guard parts.count == 3 else { return .notFound }
             return ownerFileRoute(requestedName: parts[2], ownerDataRoot: ownerDataRoot)
         }
 
@@ -112,7 +117,7 @@ final class LocalAssetServer {
     private static func ownerFileRoute(requestedName: String, ownerDataRoot: URL) -> LocalAssetRoute {
         guard OwnerDataContract.requiredFiles.contains(where: {
             $0.caseInsensitiveCompare(requestedName) == .orderedSame
-        }) else { return .badRequest }
+        }) else { return .notFound }
         guard let actualNames = try? FileManager.default.contentsOfDirectory(atPath: ownerDataRoot.path),
               let actualName = resolveOwnerFileName(requestedName: requestedName, actualNames: actualNames) else {
             return .notFound

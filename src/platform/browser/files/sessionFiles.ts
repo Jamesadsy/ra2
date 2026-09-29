@@ -1,5 +1,6 @@
 import { normalizeGuestPath } from '../../../vm86/paths';
 import { MemoryGameFileProvider } from '../../../resources/providers/memory';
+import type { GameFileMetadata } from '../../../contracts/fileMetadata';
 import { IndexedDbWriteCache } from './writeCache';
 
 /**
@@ -32,6 +33,10 @@ export class SessionGameFileProvider extends MemoryGameFileProvider {
     return this.writeCache.read(normalized);
   }
 
+  readMetadata(path: string): Promise<GameFileMetadata | null> {
+    return this.writeCache.readMetadata(normalizeGuestPath(path));
+  }
+
   override async readPrefix(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; totalSize: number } | null> {
     // Copy only the requested range from large in-memory packages; persistence fallback uses the same precedence as read.
     const bytes = this.files.get(normalizeGuestPath(path)) ?? (await this.writeCache.read(normalizeGuestPath(path)));
@@ -43,11 +48,15 @@ export class SessionGameFileProvider extends MemoryGameFileProvider {
     return bytes?.slice(offset, offset + length) ?? null;
   }
 
-  async write(path: string, bytes: Uint8Array): Promise<void> {
+  async write(path: string, bytes: Uint8Array, metadata?: GameFileMetadata): Promise<void> {
     const normalized = normalizeGuestPath(path);
     if (!normalized) throw new Error('拒绝写入空游戏路径');
     await super.write(path, bytes);
-    await this.writeCache.write(normalized, bytes);
+    await this.writeCache.write(normalized, bytes, metadata);
+  }
+
+  writeMetadata(path: string, metadata: GameFileMetadata): Promise<void> {
+    return this.writeCache.writeMetadata(normalizeGuestPath(path), metadata);
   }
 
   async list(directory: string): Promise<string[] | null> {

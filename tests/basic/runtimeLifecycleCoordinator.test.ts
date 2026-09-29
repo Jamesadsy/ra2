@@ -36,6 +36,16 @@ function workerSnapshot(overrides: Partial<VmLifecycleSnapshot> = {}): VmLifecyc
 function audioSnapshot(): VmAudioLifecycleSnapshot {
   return {
     contextState: 'running',
+    contextIdentity: 1,
+    contextCreationCount: 1,
+    lifecycleRecoveryPending: false,
+    suspendCallAttempted: false,
+    suspendSucceeded: null,
+    automaticResumeAttempted: false,
+    automaticResumeResult: null,
+    trustedGestureAttemptCount: 0,
+    trustedGestureResumeResult: null,
+    trustedInteractionTrusted: null,
     contextTimeSeconds: 10,
     contextSampleRateHz: 48_000,
     playingBuffers: 1,
@@ -133,7 +143,9 @@ describe('RA2 lifecycle coordination', () => {
       ).toBe(true);
       expect(JSON.stringify(test.metrics)).not.toContain('must-not-leak');
 
-      test.win.dispatchEvent(new Event('pointerdown'));
+      const trustedInteraction = new Event('pointerdown');
+      Object.defineProperty(trustedInteraction, 'isTrusted', { value: true });
+      test.win.dispatchEvent(trustedInteraction);
       await test.settle();
       expect(test.actions.at(-1)).toBe('audio-unlock');
       expect(test.metrics.some((record) => record.lifecyclePhase === 'first-post-resume-interaction')).toBe(true);

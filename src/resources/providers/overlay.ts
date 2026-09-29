@@ -1,4 +1,4 @@
-import type { GameFileProvider } from '../contracts';
+import type { GameFileMetadata, GameFileProvider } from '../contracts';
 import { normalizeGuestPath } from '../../vm86/paths';
 
 /** Overlay memory files over underlying provider reads; writes and persistence still use the underlying provider. */
@@ -56,6 +56,10 @@ export class OverlayGameFileProvider implements GameFileProvider {
     return this.parent.read(path);
   }
 
+  readMetadata(path: string): Promise<GameFileMetadata | null> {
+    return this.parent.readMetadata?.(path) ?? Promise.resolve(null);
+  }
+
   async readPrefix(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; totalSize: number } | null> {
     if (this.parentFirst) {
       const base = this.parent.readPrefix
@@ -90,9 +94,14 @@ export class OverlayGameFileProvider implements GameFileProvider {
     return bytes?.slice(offset, offset + length) ?? null;
   }
 
-  write(path: string, bytes: Uint8Array): Promise<void> {
+  write(path: string, bytes: Uint8Array, metadata?: GameFileMetadata): Promise<void> {
     if (this.shadowOverlayWrites && this.overlay.has(normalizeGuestPath(path))) return Promise.resolve();
-    return this.parent.write(path, bytes);
+    return this.parent.write(path, bytes, metadata);
+  }
+
+  writeMetadata(path: string, metadata: GameFileMetadata): Promise<void> {
+    if (this.shadowOverlayWrites && this.overlay.has(normalizeGuestPath(path))) return Promise.resolve();
+    return this.parent.writeMetadata?.(path, metadata) ?? Promise.resolve();
   }
 
   flush(): Promise<void> {

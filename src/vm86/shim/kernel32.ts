@@ -90,6 +90,15 @@ export function withKernel32<TBase extends Constructor<ShimGraphicsChain>>(Base:
 
     /** The host supplies directory snapshots without mounting metadata placeholders as empty files; refresh per search to include new saves. */
     setFileSearchResults(pattern: string, entries: readonly GuestFileEntry[]): void {
+      for (const entry of entries) {
+        if (entry.metadata) {
+          this.fileTimes.set(normalizeGuestPath(entry.path), {
+            created: entry.metadata.created,
+            accessed: entry.metadata.accessed,
+            written: entry.metadata.written,
+          });
+        }
+      }
       this.fileSearchListings.set(
         normalizeGuestPath(pattern),
         entries.map((entry) => ({ ...entry })),
@@ -1313,7 +1322,9 @@ export function withKernel32<TBase extends Constructor<ShimGraphicsChain>>(Base:
       this.notifyFileWrite(file.path, file.bytes.subarray(0, file.size));
     }
     protected notifyFileWrite(path: string, bytes: Uint8Array): void {
-      this.options.onFileWrite?.(path, bytes.slice());
+      const times = this.fileTimes.get(normalizeGuestPath(path));
+      const metadata = times ? { ...times, createdSource: 'win32' as const } : undefined;
+      this.options.onFileWrite?.(path, bytes.slice(), metadata);
     }
     /**
      * Mirror on open, including writable handles because native code often opens read/write but only reads. On first guest write, demoteFileMirror restores the canonical path.
@@ -2101,6 +2112,9 @@ export function withKernel32<TBase extends Constructor<ShimGraphicsChain>>(Base:
       if (access) times.accessed = this.readFileTimeValue(access);
       if (written) times.written = this.readFileTimeValue(written);
       this.fileTimes.set(file.path, times);
+      // A metadata-only commit is safe only when this handle has no uncommitted byte writes.
+      // Dirty bytes and their latest FILETIME are committed together on close/flush.
+      if (!file.dirty) this.options.onFileMetadataWrite?.(file.path, { ...times, createdSource: 'win32' });
       this.lastError = 0;
       return true;
     }

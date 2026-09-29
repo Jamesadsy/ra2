@@ -11,8 +11,10 @@ export async function readGuestFileSearch(files: GameFileProvider, pattern: stri
     // Only the length is needed; avoid copying hundreds of MB of assets. All built-in providers support prefix reads.
     const info = files.readPrefix ? await files.readPrefix(path, 1) : null;
     const data = !files.readPrefix ? await files.read(path) : null;
-    if (info || data) entries.push({ path, size: info?.totalSize ?? data!.length });
-    else if ((await files.list(path))?.length) entries.push({ path, size: 0, directory: true });
+    if (info || data) {
+      const metadata = await files.readMetadata?.(path);
+      entries.push({ path, size: info?.totalSize ?? data!.length, ...(metadata ? { metadata } : {}) });
+    } else if ((await files.list(path))?.length) entries.push({ path, size: 0, directory: true });
   }
   return entries;
 }

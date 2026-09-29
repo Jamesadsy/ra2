@@ -75,7 +75,7 @@ export function withShimFiles<TBase extends Constructor<ShimState>>(Base: TBase)
       // caller after this synchronous mount.  The Win32 layer owns its snapshot;
       // otherwise a later fetch/decode can silently corrupt an already-open map.
       if (normalized) {
-        this.storeFile(normalized, takeOwnership ? bytes : bytes.slice());
+        this.storeFile(normalized, takeOwnership ? bytes : bytes.slice(), false);
         if (logicalSize > bytes.length) this.fileLogicalSizes.set(normalized, logicalSize);
       }
     }
@@ -166,7 +166,7 @@ export function withShimFiles<TBase extends Constructor<ShimState>>(Base: TBase)
     }
 
     /** Write/update file-layer content and timestamps: initialize created once; refresh written/accessed on writes. */
-    protected storeFile(path: string, bytes: Uint8Array): void {
+    protected storeFile(path: string, bytes: Uint8Array, guestWrite = true): void {
       this.files.set(path, bytes);
       this.fileLogicalSizes.delete(path);
       this.rangeBackedFiles.delete(path);
@@ -174,7 +174,7 @@ export function withShimFiles<TBase extends Constructor<ShimState>>(Base: TBase)
       const now = this.guestNowFileTime();
       const times = this.fileTimes.get(path);
       if (!times) this.fileTimes.set(path, { created: now, accessed: now, written: now });
-      else {
+      else if (guestWrite) {
         times.accessed = now;
         times.written = now;
       }

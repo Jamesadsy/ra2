@@ -116,7 +116,11 @@ it('纯文件 provider 不依赖游戏识别、浏览器存储、VM 实现或 Re
         /^src\/(?:resources\/(?:contracts$|providers\/)|vm86\/paths$)/,
       );
     }
-  expect(imports(readFileSync('src/resources/contracts.ts', 'utf8'))).toEqual([]);
+  expect(
+    imports(readFileSync('src/resources/contracts.ts', 'utf8')).filter(
+      (specifier) => specifier !== '../contracts/fileMetadata',
+    ),
+  ).toEqual([]);
 });
 
 it('浏览器文件实现和游戏识别不回到 adapter 聚合层，也不依赖 UI', () => {

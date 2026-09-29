@@ -39,6 +39,16 @@ export interface VmLifecycleFramePipeline {
 
 export interface VmAudioLifecycleSnapshot {
   contextState: string;
+  contextIdentity: number | null;
+  contextCreationCount: number;
+  lifecycleRecoveryPending: boolean;
+  suspendCallAttempted: boolean;
+  suspendSucceeded: boolean | null;
+  automaticResumeAttempted: boolean;
+  automaticResumeResult: boolean | null;
+  trustedGestureAttemptCount: number;
+  trustedGestureResumeResult: boolean | null;
+  trustedInteractionTrusted: boolean | null;
   contextTimeSeconds: number | null;
   contextSampleRateHz: number | null;
   lastWorkletCursorUpdateAgeMs?: number | null;
@@ -74,6 +84,7 @@ export interface VmAudioLifecycleSnapshot {
     source: boolean;
     stream: boolean;
     worklet: boolean;
+    lifecycleWasLiveStreamed: boolean;
   }>;
   sampleRates: number[];
   frequencies: number[];

@@ -281,10 +281,17 @@ final class LocalWebKitContractTests: XCTestCase {
         let (_, unauthorizedMapsResponse) = try await URLSession.shared.data(from: mapsURL)
         XCTAssertEqual((unauthorizedMapsResponse as? HTTPURLResponse)?.statusCode, 404)
 
-        let (_, unknownScopedResponse) = try await URLSession.shared.data(
-            from: try XCTUnwrap(URL(string: "/game/ra2/unknown.mix", relativeTo: server.origin)?.absoluteURL)
-        )
-        XCTAssertEqual((unknownScopedResponse as? HTTPURLResponse)?.statusCode, 400)
+        for path in [
+            "/game/mininuke%20-%20added%2011/30.vxl",
+            "/game/ra2/mininuke%20-%20added%2011/30.vxl",
+            "/game/unknown.vxl",
+            "/game/ra2/unknown.mix",
+        ] {
+            let (_, missingResponse) = try await URLSession.shared.data(
+                from: try XCTUnwrap(URL(string: path, relativeTo: server.origin)?.absoluteURL)
+            )
+            XCTAssertEqual((missingResponse as? HTTPURLResponse)?.statusCode, 404, path)
+        }
     }
 
     private func waitForString(_ expression: String, in webView: WKWebView) async throws -> String? {

@@ -41,7 +41,7 @@ export interface VmShell extends SessionRuntime {
   readonly runtimeInfo: VmRuntimeInfo;
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics>;
   /** Pause, resume, or probe the live guest and its host audio lifecycle. */
-  lifecycle(action: VmLifecycleAction | 'audio-unlock'): Promise<VmLifecycleReport>;
+  lifecycle(action: VmLifecycleAction | 'audio-unlock', trustedInteraction?: Event): Promise<VmLifecycleReport>;
   /** Unlock AudioContext and prepare the PCM worklet from the trusted in-WebView start gesture. */
   unlockAudioForStart(): Promise<VmAudioLifecycleSnapshot>;
   /** Update only the filesystem; do not restart the VM or refresh the guest map list. */

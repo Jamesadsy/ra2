@@ -90,6 +90,50 @@ export function installRuntimeLifecycleCoordinator(
       presentedFrameCount: getPresentedFrameCount(),
       presentedFrameDelta: getPresentedFrameCount() - backgroundPresentedFrames,
       audioContextState: audio?.contextState,
+      audioContextIdentity: audio?.contextIdentity ?? undefined,
+      audioContextCreationCount: audio?.contextCreationCount,
+      audioLifecycleRecoveryPending: audio ? Number(audio.lifecycleRecoveryPending) : undefined,
+      audioSuspendCallAttempted: audio ? Number(audio.suspendCallAttempted) : undefined,
+      audioSuspendSucceeded:
+        audio?.suspendSucceeded === null || audio?.suspendSucceeded === undefined
+          ? undefined
+          : Number(audio.suspendSucceeded),
+      audioAutomaticResumeAttempted: audio ? Number(audio.automaticResumeAttempted) : undefined,
+      audioAutomaticResumeResult:
+        audio?.automaticResumeResult === null || audio?.automaticResumeResult === undefined
+          ? undefined
+          : Number(audio.automaticResumeResult),
+      audioTrustedGestureAttemptCount: audio?.trustedGestureAttemptCount,
+      audioTrustedGestureResumeResult:
+        audio?.trustedGestureResumeResult === null || audio?.trustedGestureResumeResult === undefined
+          ? undefined
+          : Number(audio.trustedGestureResumeResult),
+      audioTrustedInteractionTrusted:
+        audio?.trustedInteractionTrusted === null || audio?.trustedInteractionTrusted === undefined
+          ? undefined
+          : Number(audio.trustedInteractionTrusted),
+      audioLiveStreamedBuffers: audio?.buffers.filter((item) => item.playing && item.lifecycleWasLiveStreamed).length,
+      audioWorkletModuleLoaded: audio ? Number(audio.audioWorkletModuleLoaded) : undefined,
+      audioBufferStates: audio?.buffers
+        .slice(0, 8)
+        .map((item) =>
+          [
+            item.ordinal,
+            Number(item.playing),
+            Number(item.loop),
+            item.positionFrames,
+            item.totalFrames,
+            item.frequency,
+            item.sampleRate,
+            item.channels,
+            item.bitsPerSample,
+            Number(item.source),
+            Number(item.stream),
+            Number(item.worklet),
+            Number(item.lifecycleWasLiveStreamed),
+          ].join(':'),
+        )
+        .join(';'),
       audioContextTimeSeconds: audio?.contextTimeSeconds ?? undefined,
       audioContextSampleRateHz: audio?.contextSampleRateHz ?? undefined,
       audioLastWorkletCursorUpdateAgeMs: audio?.lastWorkletCursorUpdateAgeMs ?? undefined,
@@ -244,8 +288,17 @@ export function installRuntimeLifecycleCoordinator(
     });
   };
 
-  const onFirstInteraction = () => {
+  const onFirstInteraction = (event: Event) => {
     if (!firstInteractionPending || recoveryShown) return;
+    if (!event.isTrusted) {
+      reportNativeRuntimeMetrics({
+        event: 'lifecycle',
+        lifecyclePhase: 'untrusted-post-resume-interaction',
+        nativeTimestampMs: Date.now(),
+        documentVisibility: document.visibilityState,
+      });
+      return;
+    }
     firstInteractionPending = false;
     const timestamp = Date.now();
     reportNativeRuntimeMetrics({
@@ -255,7 +308,7 @@ export function installRuntimeLifecycleCoordinator(
       firstGestureTimestampMs: timestamp,
       documentVisibility: document.visibilityState,
     });
-    void vm.lifecycle('audio-unlock').then(
+    void vm.lifecycle('audio-unlock', event).then(
       (result) => {
         report('audio-unlocked-by-user', timestamp, result.worker, result.audio, {}, result.framePipeline);
         if (result.audio.unlockResult === false) failClosed('audio-resume-failed-after-user-interaction', timestamp);

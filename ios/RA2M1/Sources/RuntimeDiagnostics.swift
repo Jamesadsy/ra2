@@ -369,6 +369,10 @@ final class RuntimeDiagnosticsLog {
                     "audioFrequencyHz", "audioChannels", "audioBitsPerSample", "audioBlockAlign", "audioFormatCount",
                     "audioSourceStartCount", "audioStreamStartCount", "audioWorkletStartCount", "audioDynamicStreamWrites", "audioDynamicStreamWriteRateHz",
                     "audioBufferCreateCount", "audioBufferDuplicateCount", "audioBufferCursorFrames", "audioBufferTotalFrames",
+                    "audioContextIdentity", "audioContextCreationCount", "audioLifecycleRecoveryPending", "audioSuspendCallAttempted",
+                    "audioSuspendSucceeded", "audioAutomaticResumeAttempted", "audioAutomaticResumeResult",
+                    "audioTrustedGestureAttemptCount", "audioTrustedGestureResumeResult", "audioTrustedInteractionTrusted",
+                    "audioLiveStreamedBuffers", "audioWorkletModuleLoaded",
                     "audioBufferFrequencyHz", "audioBufferSampleRateHz", "audioBufferChannels", "audioBufferBitsPerSample",
                     "audioBufferWriteCount", "audioBufferWriteAgeMs", "audioBufferFrequencyChanges",
                     "audioActiveBufferWriteCount", "audioMaxActiveBufferWriteAgeMs", "audioActiveBufferFrequencyChanges",
@@ -387,6 +391,11 @@ final class RuntimeDiagnosticsLog {
                value.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil {
                 fields.append("\(key)=\(value)")
             }
+        }
+        if let value = body["audioBufferStates"] as? String,
+           value.count <= 512,
+           value.range(of: "^[A-Za-z0-9_:;.-]{1,512}$", options: .regularExpression) != nil {
+            fields.append("audioBufferStates=\(value)")
         }
         if let orientation = body["orientation"] as? String,
            ["portrait", "portraitUpsideDown", "landscapeLeft", "landscapeRight", "unknown"].contains(orientation) {

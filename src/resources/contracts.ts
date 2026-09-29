@@ -1,3 +1,6 @@
+import type { GameFileMetadata } from '../contracts/fileMetadata';
+export type { GameFileMetadata } from '../contracts/fileMetadata';
+
 export interface GameFileProvider {
   readonly label: string;
   /** Invalidate dynamic directories/persistence indexes without affecting this provider's pending-write snapshots. */
@@ -13,11 +16,15 @@ export interface GameFileProvider {
    */
   deepDiscovery?: boolean;
   read(path: string): Promise<Uint8Array | null>;
+  /** Persisted Win32 FILETIME metadata for writable files; static source files may return null. */
+  readMetadata?(path: string): Promise<GameFileMetadata | null>;
   /** Read a file prefix and report its full logical length, keeping huge containers out of the JS heap. */
   readPrefix?(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; totalSize: number } | null>;
   /** Read a specified range of a large file, fetching sparse MIX pages on demand during movie playback. */
   readRange?(path: string, offset: number, length: number): Promise<Uint8Array | null>;
-  write(path: string, bytes: Uint8Array): Promise<void>;
+  write(path: string, bytes: Uint8Array, metadata?: GameFileMetadata): Promise<void>;
+  /** Update timestamps without creating a metadata-only record for bytes that are not committed. */
+  writeMetadata?(path: string, metadata: GameFileMetadata): Promise<void>;
   flush(): Promise<void>;
   /** List immediate child names with original case; an empty string denotes the root. Return null if unsupported. */
   list(directory: string): Promise<string[] | null>;

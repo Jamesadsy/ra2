@@ -1,4 +1,4 @@
-import type { GameFileProvider } from '../contracts';
+import type { GameFileMetadata, GameFileProvider } from '../contracts';
 import { normalizeGuestPath } from '../../vm86/paths';
 
 /** Map a parent subdirectory to an independent game root, hiding the parent from the VM. */
@@ -30,6 +30,10 @@ export class ScopedGameFileProvider implements GameFileProvider {
     return this.parent.read(this.path(path));
   }
 
+  readMetadata(path: string): Promise<GameFileMetadata | null> {
+    return this.parent.readMetadata?.(this.path(path)) ?? Promise.resolve(null);
+  }
+
   readPrefix(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; totalSize: number } | null> {
     if (this.parent.readPrefix) return this.parent.readPrefix(this.path(path), maxBytes);
     return this.parent
@@ -42,8 +46,12 @@ export class ScopedGameFileProvider implements GameFileProvider {
     return this.parent.read(this.path(path)).then((bytes) => bytes?.slice(offset, offset + length) ?? null);
   }
 
-  write(path: string, bytes: Uint8Array): Promise<void> {
-    return this.parent.write(this.path(path), bytes);
+  write(path: string, bytes: Uint8Array, metadata?: GameFileMetadata): Promise<void> {
+    return this.parent.write(this.path(path), bytes, metadata);
+  }
+
+  writeMetadata(path: string, metadata: GameFileMetadata): Promise<void> {
+    return this.parent.writeMetadata?.(this.path(path), metadata) ?? Promise.resolve();
   }
 
   flush(): Promise<void> {

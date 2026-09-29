@@ -301,7 +301,8 @@ export class VmCore {
         moduleName: game.executable,
         // Shared by Workers and main-thread fallback; expose only the original campaign speed control without changing speed or the clock.
         commandLineArguments: game.commandLineArguments,
-        onFileWrite: (path, bytes) => this.queueFileWrite(path, bytes),
+        onFileWrite: (path, bytes, metadata) => this.queueFileWrite(path, bytes, metadata),
+        onFileMetadataWrite: (path, metadata) => this.queueFileMetadataWrite(path, metadata),
         driveTypes: game.driveTypes,
       });
       let linkedEntry = image.entry;
@@ -904,12 +905,16 @@ export class VmCore {
     })();
   }
 
-  private queueFileWrite(path: string, bytes: Uint8Array): void {
+  private queueFileWrite(
+    path: string,
+    bytes: Uint8Array,
+    metadata?: import('../contracts/fileMetadata').GameFileMetadata,
+  ): void {
     this.rangePrefetch.clear();
     this.missingStaticGuestFiles.delete(normalizeGuestPath(path));
     let write: Promise<void>;
     try {
-      write = this.source.files.write(path, bytes);
+      write = this.source.files.write(path, bytes, metadata);
     } catch (error) {
       write = Promise.reject(error);
     }
@@ -919,6 +924,19 @@ export class VmCore {
         const reason = error instanceof Error ? error : new Error(String(error));
         this.pendingFileWriteError ??= reason;
         this.status('error', `写入游戏目录失败：${path}；${reason.message}`);
+      })
+      .finally(() => this.pendingFileWrites.delete(write));
+  }
+
+  private queueFileMetadataWrite(path: string, metadata: import('../contracts/fileMetadata').GameFileMetadata): void {
+    const write = this.source.files.writeMetadata?.(path, metadata);
+    if (!write) return;
+    this.pendingFileWrites.add(write);
+    void write
+      .catch((error) => {
+        const reason = error instanceof Error ? error : new Error(String(error));
+        this.pendingFileWriteError ??= reason;
+        this.status('error', `写入游戏文件元数据失败：${path}；${reason.message}`);
       })
       .finally(() => this.pendingFileWrites.delete(write));
   }

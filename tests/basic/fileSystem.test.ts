@@ -32,23 +32,28 @@ type FakeRequest<T = unknown> = {
   error: DOMException | null;
   onsuccess: (() => void) | null;
   onerror: (() => void) | null;
-  onupgradeneeded: (() => void) | null;
+  onupgradeneeded: ((event: { oldVersion: number }) => void) | null;
+  transaction?: FakeTransaction;
+};
+
+type FakeObjectStore = {
+  get(key: string): FakeRequest<unknown>;
+  put(value: unknown, key: string): FakeRequest<void>;
+  getAllKeys(): FakeRequest<IDBValidKey[]>;
+  openCursor(): FakeRequest<null>;
+};
+
+type FakeTransaction = {
+  error?: DOMException | null;
+  oncomplete?: () => void;
+  objectStore(storeName: string): FakeObjectStore;
 };
 
 type FakeDatabase = {
-  stores: Map<string, Map<string, ArrayBuffer>>;
+  stores: Map<string, Map<string, unknown>>;
+  objectStoreNames: { contains(name: string): boolean };
   createObjectStore(name: string): void;
-  transaction(
-    name: string,
-    mode?: 'readonly' | 'readwrite',
-  ): {
-    oncomplete?: () => void;
-    objectStore(storeName: string): {
-      get(key: string): FakeRequest<ArrayBuffer | undefined>;
-      put(value: ArrayBuffer, key: string): FakeRequest<void>;
-      getAllKeys(): FakeRequest<IDBValidKey[]>;
-    };
-  };
+  transaction(name: string, mode?: 'readonly' | 'readwrite'): FakeTransaction;
 };
 
 function asyncRequest<T>(result: T): FakeRequest<T> {
@@ -64,8 +69,24 @@ function installFakeIndexedDb(): { getCalls: number; getAllKeysCalls: number } {
       const database = existing ?? createFakeDatabase(metrics);
       if (!existing) databases.set(name, database);
       const request = asyncRequest(database);
+      if (!existing) {
+        request.transaction = {
+          objectStore(storeName) {
+            return {
+              get: (key) => database.transaction(storeName, 'readwrite').objectStore(storeName).get(key),
+              put: (value, key) => database.transaction(storeName, 'readwrite').objectStore(storeName).put(value, key),
+              getAllKeys: () => database.transaction(storeName, 'readwrite').objectStore(storeName).getAllKeys(),
+              openCursor: () => {
+                const cursor = asyncRequest<null>(null);
+                queueMicrotask(() => cursor.onsuccess?.());
+                return cursor;
+              },
+            };
+          },
+        };
+      }
       queueMicrotask(() => {
-        if (!existing) request.onupgradeneeded?.();
+        if (!existing) request.onupgradeneeded?.({ oldVersion: 0 });
         request.onsuccess?.();
       });
       return request;
@@ -77,16 +98,17 @@ function installFakeIndexedDb(): { getCalls: number; getAllKeysCalls: number } {
 }
 
 function createFakeDatabase(metrics: { getCalls: number; getAllKeysCalls: number }): FakeDatabase {
-  const stores = new Map<string, Map<string, ArrayBuffer>>();
+  const stores = new Map<string, Map<string, unknown>>();
   return {
     stores,
+    objectStoreNames: { contains: (name) => stores.has(name) },
     createObjectStore(name) {
       stores.set(name, new Map());
     },
     transaction(name) {
       const store = stores.get(name);
       if (!store) throw new Error(`Fake IndexedDB store missing: ${name}`);
-      const transaction: ReturnType<FakeDatabase['transaction']> = {
+      const transaction: FakeTransaction = {
         objectStore() {
           return {
             get(key: string) {
@@ -97,11 +119,11 @@ function createFakeDatabase(metrics: { getCalls: number; getAllKeysCalls: number
               queueMicrotask(() => request.onsuccess?.());
               return request;
             },
-            put(value: ArrayBuffer, key: string) {
+            put(value: unknown, key: string) {
               const request = asyncRequest(undefined);
               // IndexedDB structured-clones ArrayBuffer values.  Do the same so
               // mutating the caller's Uint8Array cannot mutate the stored copy.
-              const copy = value.slice(0);
+              const copy = structuredClone(value);
               queueMicrotask(() => {
                 request.onsuccess?.();
                 queueMicrotask(() => {
@@ -114,6 +136,11 @@ function createFakeDatabase(metrics: { getCalls: number; getAllKeysCalls: number
             getAllKeys() {
               metrics.getAllKeysCalls++;
               const request = asyncRequest([...store.keys()]);
+              queueMicrotask(() => request.onsuccess?.());
+              return request;
+            },
+            openCursor() {
+              const request = asyncRequest<null>(null);
               queueMicrotask(() => request.onsuccess?.());
               return request;
             },

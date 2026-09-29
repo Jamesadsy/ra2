@@ -70,6 +70,25 @@ describe('客体文件枚举', () => {
     expect(first('*.sav')).toBe(0xffffffff);
   });
 
+  it('FindFirstFileA restores provider FILETIME instead of returning the 1601 zero value', () => {
+    const { memory, shim, data, first } = setup();
+    const metadata = {
+      created: 133_801_234_000_000_000n,
+      accessed: 133_801_234_100_000_000n,
+      written: 133_801_234_200_000_000n,
+    };
+    shim.setFileSearchResults('save/*.sav', [{ path: 'save/slot.sav', size: 3, metadata }]);
+    shim.mountFile('save/slot.sav', new Uint8Array([1, 2, 3]));
+
+    expect(first('save/*.sav')).not.toBe(0xffff_ffff);
+    const field = (offset: number) =>
+      BigInt(readU32(memory, data + offset)) | (BigInt(readU32(memory, data + offset + 4)) << 32n);
+    expect(field(4)).toBe(metadata.created);
+    expect(field(12)).toBe(metadata.accessed);
+    expect(field(20)).toBe(metadata.written);
+    expect(field(4)).not.toBe(0n);
+  });
+
   it('无匹配与无效参数不会伪造成功或写坏输出结构', () => {
     const { memory, shim, data, first, error } = setup();
     memory.write_memory(new Uint8Array(320).fill(0xa5), data);

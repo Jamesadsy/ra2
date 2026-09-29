@@ -68,6 +68,8 @@ async function browsers(): Promise<void> {
   ]);
   for (const test of [
     'test:browser:audio',
+    'test:browser:audio-gesture',
+    'test:browser:cold-save',
     'test:graphics',
     'test:graphics:upscale',
     'test:graphics:ai',

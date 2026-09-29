@@ -56,6 +56,8 @@ The session lifecycle interface in `app/session/runtime.ts` requires only startu
 
 `platform/browser/files/sessionFiles.ts` owns the browser implementation for extracted files and IndexedDB writeback. `adapter/gameZip.ts` selects parsers and composes results; it no longer defines persistence providers. Pure memory providers remain in `resources/providers/memory.ts`.
 
+Writable IndexedDB records are keyed by normalized, case-insensitive guest paths and commit bytes plus Win32 FILETIME metadata in one version-2 record/transaction. The version-1 upgrade retains byte-only records and stamps them with one deterministic migration-time fallback per upgrade, marked `legacy-migration-fallback`; this is a usable date, not an assertion of the save's historical time. Guest enumeration restores those times into the Win32 shim before `FindFirstFileA` writes `WIN32_FIND_DATAA`. Overwrites keep creation time and update access/write time. Metadata-only `SetFileTime` writes update an existing committed byte record only.
+
 File interfaces distinguish unknown, missing, zero-byte, and failed reads. A visible directory entry does not imply its bytes have been extracted. Reads pending background work wait for the provider instead of pretending the file is missing. Range reads preserve actual lengths and offsets.
 
 Runtime settings do not overwrite original game files, executables, or cross-session caches. INI and save writes go into a session overlay with priority over original sources. Static files may reuse snapshots; writable INI/SAV content is reread according to policy. Replacing a provider invalidates affected caches. Zero-byte files participate in save/restore and must not disappear during cache cleanup.

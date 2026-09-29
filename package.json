@@ -50,6 +50,8 @@
     "test:browser:touch-ui": "tsx tests/basic/browser/touchUiBrowserSmoke.mts",
     "test:browser:performance": "tsx tests/basic/browser/performanceDiagnosticsBrowserSmoke.mts",
     "test:browser:audio": "tsx tests/basic/browser/audioLifecycleBrowserSmoke.mts",
+    "test:browser:audio-gesture": "tsx tests/basic/browser/audioGestureRecoveryBrowserSmoke.mts",
+    "test:browser:cold-save": "tsx tests/basic/browser/coldSaveLoadPersistenceBrowserSmoke.mts",
     "test:browser:react-ui": "tsx tests/basic/browser/reactUiBrowserSmoke.mts",
     "test:browser:tap-start": "tsx tests/basic/browser/tapToStartGateBrowserSmoke.mts",
     "test:browser:third-party-preload": "tsx tests/real-game/browser/thirdPartyPreloadBrowserSmoke.mts",

@@ -18,6 +18,7 @@ const STREAM_PROCESSOR_FRAMES = 4_096;
 
 /** Registration name used by pcmStreamWorklet.js. */
 const PCM_STREAM_WORKLET_NAME = 'ra2-pcm-stream';
+let nextAudioContextIdentity = 1;
 
 /** AudioWorklet module cache: share one addModule call per context and allow retries after failure. */
 const workletModules = new WeakMap<AudioContext, Promise<void>>();
@@ -121,6 +122,8 @@ export class WebAudioPcmSink {
   private readonly workletQuiesceResolvers = new WeakMap<AudioWorkletNode, () => void>();
   private readonly workletDestroyResolvers = new WeakMap<AudioWorkletNode, () => void>();
   private context: AudioContext | null = null;
+  private contextIdentity: number | null = null;
+  private contextCreationCount = 0;
   private destroyed = false;
   private masterGain: GainNode | null = null;
   /** Linear master gain 0..1, applied after all buffers and before the destination. */
@@ -146,6 +149,15 @@ export class WebAudioPcmSink {
   /** Last processor count reported by the audio thread; grows without bound if disconnected nodes are never collected. */
   private liveWorkletProcessors = 0;
   private dynamicWriteStartedAt: number | null = null;
+  private lifecycleRecoveryPending = false;
+  private suspendCallAttempted = false;
+  private suspendSucceeded: boolean | null = null;
+  private automaticResumeAttempted = false;
+  private automaticResumeResult: boolean | null = null;
+  private trustedGestureAttemptCount = 0;
+  private trustedGestureResumeResult: boolean | null = null;
+  private trustedInteractionTrusted: boolean | null = null;
+  private readonly gestureUnlocks = new WeakMap<Event, Promise<boolean>>();
 
   constructor(private readonly options: WebAudioPcmSinkOptions = {}) {
     if (options.diagnosticsIntervalMs) {
@@ -412,6 +424,16 @@ export class WebAudioPcmSink {
     }
     return {
       contextState: context?.state ?? 'uncreated',
+      contextIdentity: this.contextIdentity,
+      contextCreationCount: this.contextCreationCount,
+      lifecycleRecoveryPending: this.lifecycleRecoveryPending,
+      suspendCallAttempted: this.suspendCallAttempted,
+      suspendSucceeded: this.suspendSucceeded,
+      automaticResumeAttempted: this.automaticResumeAttempted,
+      automaticResumeResult: this.automaticResumeResult,
+      trustedGestureAttemptCount: this.trustedGestureAttemptCount,
+      trustedGestureResumeResult: this.trustedGestureResumeResult,
+      trustedInteractionTrusted: this.trustedInteractionTrusted,
       contextTimeSeconds: now,
       contextSampleRateHz: context?.sampleRate ?? null,
       lastWorkletCursorUpdateAgeMs: cursorAges.length ? Math.max(...cursorAges) : null,
@@ -449,6 +471,7 @@ export class WebAudioPcmSink {
         source: state.source !== null,
         stream: state.stream !== null,
         worklet: state.worklet !== null,
+        lifecycleWasLiveStreamed: state.lifecycleWasLiveStreamed,
       })),
       sampleRates: [...new Set(playing.map((state) => state.format.nSamplesPerSec))].slice(0, 8),
       frequencies: [...new Set(playing.map((state) => state.frequency))].slice(0, 8),
@@ -472,6 +495,13 @@ export class WebAudioPcmSink {
   /** Checkpoint cursors and tear down live nodes before iOS suspends the page's audio thread. */
   async suspendForLifecycle(): Promise<VmAudioLifecycleSnapshot> {
     const before = this.getLifecycleSnapshot();
+    this.lifecycleRecoveryPending = true;
+    this.suspendCallAttempted = false;
+    this.suspendSucceeded = null;
+    this.automaticResumeAttempted = false;
+    this.automaticResumeResult = null;
+    this.trustedGestureResumeResult = null;
+    this.trustedInteractionTrusted = null;
     for (const state of this.buffers.values()) {
       if (state.playing) {
         state.lifecycleWasLiveStreamed = state.stream !== null || state.worklet !== null;
@@ -492,10 +522,16 @@ export class WebAudioPcmSink {
       }),
     );
     const context = this.context;
+    if (context && context.state !== 'closed') {
+      this.suspendSucceeded = context.state === 'suspended';
+    }
     if (context && context.state === 'running') {
+      this.suspendCallAttempted = true;
       try {
         await context.suspend();
+        this.suspendSucceeded = readContextState(context) === 'suspended';
       } catch (error) {
+        this.suspendSucceeded = false;
         this.report(error);
       }
     }
@@ -504,8 +540,12 @@ export class WebAudioPcmSink {
 
   /** Try a seamless foreground resume; if iOS requires a gesture, persistent unlock hooks rebuild playback on first input. */
   async resumeForLifecycle(): Promise<VmAudioLifecycleSnapshot> {
-    if (!this.context) return this.getLifecycleSnapshot();
-    const unlocked = await this.unlock();
+    const context = this.context;
+    this.automaticResumeAttempted = context !== null && context.state !== 'closed';
+    this.automaticResumeResult = null;
+    if (!context || context.state === 'closed') return this.getLifecycleSnapshot(false);
+    const unlocked = await this.resumeAndRestore(context, true, undefined, false);
+    this.automaticResumeResult = unlocked;
     return this.getLifecycleSnapshot(unlocked);
   }
 
@@ -545,14 +585,59 @@ export class WebAudioPcmSink {
     if (this.destroyed) return false;
     const context = this.ensureContext();
     if (!context) return false;
+    return this.resumeAndRestore(context, this.lifecycleRecoveryPending, undefined, false);
+  }
+
+  /** Invoke AudioContext.resume synchronously inside a verified trusted input event, including WebKit's reported-running recovery case. */
+  unlockFromTrustedInteraction(event: Event): Promise<boolean> {
+    if (!event.isTrusted) {
+      this.trustedInteractionTrusted = false;
+      return Promise.resolve(false);
+    }
+    const previous = this.gestureUnlocks.get(event);
+    if (previous) return previous;
+    this.trustedGestureAttemptCount++;
+    this.trustedInteractionTrusted = true;
+    this.trustedGestureResumeResult = null;
+    const context = this.destroyed ? null : this.ensureContext();
+    if (!context) {
+      this.trustedGestureResumeResult = false;
+      const failed = Promise.resolve(false);
+      this.gestureUnlocks.set(event, failed);
+      return failed;
+    }
+    let resume: Promise<void> | undefined;
     try {
-      if (context.state !== 'running') await context.resume();
-      if (context.state !== 'running') return false;
+      // The call must happen before this handler returns: WebKit checks the current trusted event stack.
+      if (this.lifecycleRecoveryPending || context.state !== 'running') resume = context.resume();
+    } catch (error) {
+      this.report(error);
+      this.trustedGestureResumeResult = false;
+      const failed = Promise.resolve(false);
+      this.gestureUnlocks.set(event, failed);
+      return failed;
+    }
+    const pending = this.resumeAndRestore(context, false, resume, true);
+    this.gestureUnlocks.set(event, pending);
+    return pending;
+  }
+
+  private async resumeAndRestore(
+    context: AudioContext,
+    forceResume: boolean,
+    resumeRequest: Promise<void> | undefined,
+    trustedGesture: boolean,
+  ): Promise<boolean> {
+    try {
+      if (resumeRequest) await resumeRequest;
+      else if (forceResume || context.state !== 'running') await context.resume();
+      if (this.context !== context || context.state !== 'running') {
+        if (trustedGesture) this.trustedGestureResumeResult = false;
+        return false;
+      }
       for (const state of this.buffers.values()) {
         if (!state.playing) continue;
         if (state.worklet && context.currentTime - state.workletPositionAt > 1) {
-          // The AudioWorklet object can remain attached after iOS suspends its render thread. Restore the last
-          // cursor actually acknowledged by the worklet instead of extrapolating across the suspension.
           state.positionBytes = Math.floor(state.streamFrame) * state.format.nBlockAlign;
           this.detachPlayback(state, false);
         }
@@ -562,9 +647,14 @@ export class WebAudioPcmSink {
           state.lifecycleWasLiveStreamed = false;
         }
       }
+      if (trustedGesture) {
+        this.lifecycleRecoveryPending = false;
+        this.trustedGestureResumeResult = true;
+      }
       return true;
     } catch (error) {
       this.report(error);
+      if (trustedGesture) this.trustedGestureResumeResult = false;
       return false;
     }
   }
@@ -584,8 +674,8 @@ export class WebAudioPcmSink {
       for (const event of events) eventTarget.removeEventListener(event, listener, true);
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
     };
-    const listener = (): void => {
-      void this.unlock();
+    const listener = (event: Event): void => {
+      void this.unlockFromTrustedInteraction(event);
     };
     const onVisible = (): void => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') void this.unlock();
@@ -992,7 +1082,10 @@ export class WebAudioPcmSink {
   }
 
   private ensureContext(): AudioContext | null {
-    if (this.context?.state === 'closed') this.context = null;
+    if (this.context?.state === 'closed') {
+      this.context = null;
+      this.contextIdentity = null;
+    }
     if (this.context) return this.context;
     try {
       if (this.options.contextFactory) {
@@ -1001,6 +1094,8 @@ export class WebAudioPcmSink {
         if (typeof AudioContext === 'undefined') return null;
         this.context = new AudioContext();
       }
+      this.contextIdentity = nextAudioContextIdentity++;
+      this.contextCreationCount++;
       // A new context needs a new master gain node; the old node is destroyed with its context.
       this.masterGain = null;
       if (this.options.diagnosticsIntervalMs) {
@@ -1073,6 +1168,10 @@ export class WebAudioPcmSink {
     );
     Object.assign(activity, { plays: 0, stops: 0, writes: 0, writeBytes: 0, errors: 0, lastError: '' });
   }
+}
+
+function readContextState(context: AudioContext): string {
+  return context.state;
 }
 
 function readPcmSample(view: DataView, offset: number, bits: number): number {

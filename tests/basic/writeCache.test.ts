@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionGameFileProvider } from '../../src/platform/browser/files/sessionFiles';
 import { readGuestFileSearch } from '../../src/adapter/fileSearch';
 import { IndexedDbWriteCache } from '../../src/platform/browser/files/writeCache';
+import type { GameFileMetadata } from '../../src/contracts/fileMetadata';
 
 /** Each get independently structured-clones its result, modeling IndexedDB read ownership rather than a shared-memory cache. */
-function database(rows: Map<string, ArrayBuffer | Uint8Array>) {
-  const returned: Array<ArrayBuffer | Uint8Array | undefined> = [];
+function database(rows: Map<string, unknown>) {
+  const returned: unknown[] = [];
   let failure: Error | null = null;
   const writes: Array<{ succeed(): void; commit(): void; abort(error?: Error): void; error(error: Error): void }> = [];
   vi.stubGlobal('indexedDB', {
@@ -16,7 +17,7 @@ function database(rows: Map<string, ArrayBuffer | Uint8Array>) {
             const transaction: any = {
               objectStore() {
                 return {
-                  put(value: ArrayBuffer, key: string) {
+                  put(value: unknown, key: string) {
                     const request: any = {};
                     writes.push({
                       succeed: () => request.onsuccess?.(),
@@ -117,7 +118,7 @@ describe('写回缓存读取的独占缓冲', () => {
 
 describe('写回事务提交', () => {
   it('请求成功仍等待提交，提交后才更新索引并可恢复零字节文件', async () => {
-    const rows = new Map<string, ArrayBuffer | Uint8Array>();
+    const rows = new Map<string, unknown>();
     const fake = database(rows);
     const cache = new IndexedDbWriteCache();
     await cache.keys();
@@ -152,6 +153,60 @@ describe('写回事务提交', () => {
       expect(await cache.read('lost.sav')).toBeNull();
     },
   );
+
+  it('bytes and Win32 FILETIME commit atomically and preserve creation time on overwrite', async () => {
+    const rows = new Map<string, unknown>();
+    const fake = database(rows);
+    const first = new IndexedDbWriteCache();
+    const created = 133_801_234_000_000_000n;
+    const metadata: GameFileMetadata = {
+      created,
+      accessed: created + 10_000n,
+      written: created + 20_000n,
+    };
+
+    const initialWrite = first.write('save/slot.sav', new Uint8Array([1, 2, 3]), metadata);
+    await vi.waitFor(() => expect(fake.writes).toHaveLength(1));
+    expect(rows.has('save/slot.sav')).toBe(false);
+    fake.writes[0]!.succeed();
+    fake.writes[0]!.commit();
+    await initialWrite;
+
+    const overwrite = first.write('save/slot.sav', new Uint8Array([4, 5]), {
+      created: created + 900_000n,
+      accessed: created + 910_000n,
+      written: created + 920_000n,
+    });
+    await vi.waitFor(() => expect(fake.writes).toHaveLength(2));
+    fake.writes[1]!.succeed();
+    fake.writes[1]!.commit();
+    await overwrite;
+
+    const restored = new IndexedDbWriteCache();
+    expect(await restored.read('save/slot.sav')).toEqual(new Uint8Array([4, 5]));
+    expect(await restored.readMetadata('save/slot.sav')).toMatchObject({
+      created,
+      accessed: created + 910_000n,
+      written: created + 920_000n,
+      createdSource: 'win32',
+    });
+
+    const metadataUpdate = restored.writeMetadata('save/slot.sav', {
+      created: created + 77n,
+      accessed: created + 1_800_000n,
+      written: created + 1_900_000n,
+    });
+    await vi.waitFor(() => expect(fake.writes).toHaveLength(3));
+    fake.writes[2]!.succeed();
+    fake.writes[2]!.commit();
+    await metadataUpdate;
+    expect(await restored.readMetadata('save/slot.sav')).toMatchObject({
+      created: created + 77n,
+      accessed: created + 1_800_000n,
+      written: created + 1_900_000n,
+    });
+    expect(await restored.read('save/slot.sav')).toEqual(new Uint8Array([4, 5]));
+  });
 });
 
 describe('会话文件恢复契约', () => {

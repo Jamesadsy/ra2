@@ -67,14 +67,38 @@ final class LocalAssetServerTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/unknown.mix", webRoot: root, ownerDataRoot: data), .badRequest)
-        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/unknown.mix", webRoot: root, ownerDataRoot: data), .badRequest)
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/unknown.mix", webRoot: root, ownerDataRoot: data), .notFound)
+        XCTAssertEqual(LocalAssetServer.resolve(target: "/game/ra2/unknown.mix", webRoot: root, ownerDataRoot: data), .notFound)
     }
 
     func testEncodedAndPlainTraversalAreRejected() {
         let root = FileManager.default.temporaryDirectory
-        for target in ["/game/../secret", "/game/%2e%2e/secret", "/%2e%2e/private", "/game/ra2/%5c..%5csecret"] {
+        for target in [
+            "/game/../secret",
+            "/game/%2e%2e/secret",
+            "/%2e%2e/private",
+            "/game/ra2/%5c..%5csecret",
+            "/game/./secret",
+            "/game/%00secret",
+            "/game\\secret",
+            "/game/%zz",
+            "//game/game.exe",
+        ] {
             XCTAssertEqual(LocalAssetServer.resolve(target: target, webRoot: root, ownerDataRoot: root), .badRequest, target)
+        }
+    }
+
+    func testSafeUnknownGuestPathsAreOrdinaryMissesWithoutOwnerDataExposure() {
+        let root = FileManager.default.temporaryDirectory
+        let data = root.appendingPathComponent("Data")
+        for target in [
+            "/game/mininuke%20-%20added%2011/30.vxl",
+            "/game/ra2/mininuke%20-%20added%2011/30.vxl",
+            "/game/unknown.vxl",
+            "/game/ra2/unknown.mix",
+            "/game/ra2/unknown/nested.mix",
+        ] {
+            XCTAssertEqual(LocalAssetServer.resolve(target: target, webRoot: root, ownerDataRoot: data), .notFound, target)
         }
     }
 
@@ -90,7 +114,7 @@ final class LocalAssetServerTests: XCTestCase {
         )
         XCTAssertEqual(
             LocalAssetServer.resolve(target: "/game/not-accepted.mix", webRoot: root, ownerDataRoot: root.appendingPathComponent("Data")),
-            .badRequest
+            .notFound
         )
     }
 

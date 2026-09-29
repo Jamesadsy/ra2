@@ -1,4 +1,5 @@
 import type { GameFileProvider } from '../../../resources/contracts';
+import type { GameFileMetadata } from '../../../contracts/fileMetadata';
 import { normalizeGuestPath } from '../../../vm86/paths';
 import { IndexedDbWriteCache } from './writeCache';
 import { reportNativeRuntimeError, reportNativeRuntimePhase } from '../nativeDiagnostics';
@@ -90,6 +91,10 @@ export class HttpGameFileProvider implements GameFileProvider {
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
     return new Uint8Array(await response.arrayBuffer());
+  }
+
+  readMetadata(path: string): Promise<GameFileMetadata | null> {
+    return this.writeCache.readMetadata(normalizeGuestPath(path));
   }
 
   async readPrefix(path: string, maxBytes: number): Promise<FilePrefix | null> {
@@ -187,7 +192,7 @@ export class HttpGameFileProvider implements GameFileProvider {
     return response.status === 206 ? bytes : bytes.slice(offset, offset + length);
   }
 
-  async write(path: string, bytes: Uint8Array): Promise<void> {
+  async write(path: string, bytes: Uint8Array, metadata?: GameFileMetadata): Promise<void> {
     const normalized = normalizeGuestPath(path);
     if (!normalized) throw new Error('拒绝写入空游戏路径');
     const snapshot = bytes.slice();
@@ -199,13 +204,17 @@ export class HttpGameFileProvider implements GameFileProvider {
     }
     this.pendingPrefixes.delete(normalized);
     if (this.rangeFallback?.path === normalized) this.rangeFallback = null;
-    const operation = this.writeCache.write(normalized, snapshot);
+    const operation = this.writeCache.write(normalized, snapshot, metadata);
     this.pendingWrites.add(operation);
     try {
       await operation;
     } finally {
       this.pendingWrites.delete(operation);
     }
+  }
+
+  writeMetadata(path: string, metadata: GameFileMetadata): Promise<void> {
+    return this.writeCache.writeMetadata(normalizeGuestPath(path), metadata);
   }
 
   async flush(): Promise<void> {

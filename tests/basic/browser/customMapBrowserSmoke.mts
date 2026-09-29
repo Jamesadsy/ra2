@@ -119,7 +119,7 @@ try {
     return {
       prefix: [...prefix.bytes], totalSize: prefix.totalSize,
       range: [...await restored.readRange('save/probe.sav', 1, 1)],
-      entries: entries.sort((a, b) => a.path.localeCompare(b.path)),
+      entries: entries.map(({ path, size }) => ({ path, size })).sort((a, b) => a.path.localeCompare(b.path)),
       requestSucceeded, rejected, known: cache.hasKnownKey('save/aborted.sav'),
       absent: await new IndexedDbWriteCache().read('save/aborted.sav') === null,
     };

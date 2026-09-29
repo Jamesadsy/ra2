@@ -47,6 +47,7 @@ import {
   type VmMoviePlaybackState,
   type VmMoviePlaybackTracker,
 } from '../contracts/moviePlayback';
+import type { GameFileMetadata } from '../contracts/fileMetadata';
 
 const GUEST_BINK_VIDEO_EXPORTS = new Set([
   '_BinkSetSoundSystem@8',
@@ -195,7 +196,9 @@ export interface Win32ShimOptions {
   /** Synchronous browser font rasterizer; text ultimately writes to guest 8-bit DirectDraw surfaces. */
   textRasterizer?: Win32TextRasterizer;
   /** Notify the host to persist on writable-file close or explicit flush; bytes is an independent snapshot. */
-  onFileWrite?: (path: string, bytes: Uint8Array) => void;
+  onFileWrite?: (path: string, bytes: Uint8Array, metadata?: GameFileMetadata) => void;
+  /** Persist metadata-only changes only after the corresponding bytes are already committed. */
+  onFileMetadataWrite?: (path: string, metadata: GameFileMetadata) => void;
   /** Actual executable name exposed by guest GetCommandLine/GetModuleFileName. */
   moduleName?: string;
   /** GetCommandLineA argument suffix, independent of the module path and never affecting GetModuleFileNameA. */

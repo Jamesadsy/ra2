@@ -287,9 +287,12 @@ export class Win32GameVm implements VmShell {
     await this.core.stop();
   }
 
-  async lifecycle(action: VmLifecycleAction | 'audio-unlock'): Promise<VmLifecycleReport> {
+  async lifecycle(action: VmLifecycleAction | 'audio-unlock', trustedInteraction?: Event): Promise<VmLifecycleReport> {
     if (action === 'audio-unlock') {
-      const [worker, unlockResult] = await Promise.all([this.core.getLifecycleSnapshot(), this.audio.unlock()]);
+      const unlock = trustedInteraction
+        ? this.audio.unlockFromTrustedInteraction(trustedInteraction)
+        : this.audio.unlock();
+      const [worker, unlockResult] = await Promise.all([this.core.getLifecycleSnapshot(), unlock]);
       return { action, worker, audio: this.audio.getLifecycleSnapshot(unlockResult) };
     }
     if (action === 'pause') {

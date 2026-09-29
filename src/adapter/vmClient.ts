@@ -147,7 +147,7 @@ export class WorkerVmClient implements VmShell {
     return this.request((requestId) => ({ type: 'diagnostics', action, requestId }));
   }
 
-  async lifecycle(action: VmLifecycleAction | 'audio-unlock'): Promise<VmLifecycleReport> {
+  async lifecycle(action: VmLifecycleAction | 'audio-unlock', trustedInteraction?: Event): Promise<VmLifecycleReport> {
     if (action === 'pause') {
       this.clearPendingFrameAck();
       const worker = await this.request<VmLifecycleSnapshot>((requestId) => ({ type: 'lifecycle', action, requestId }));
@@ -170,7 +170,7 @@ export class WorkerVmClient implements VmShell {
           false,
           3_000,
         ),
-        this.audio.unlock(),
+        trustedInteraction ? this.audio.unlockFromTrustedInteraction(trustedInteraction) : this.audio.unlock(),
       ]);
       return {
         action,

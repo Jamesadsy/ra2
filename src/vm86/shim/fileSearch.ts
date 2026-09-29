@@ -1,10 +1,12 @@
 import { normalizeGuestPath } from '../paths';
+import type { GameFileMetadata } from '../../contracts/fileMetadata';
 
 /** Directory metadata is not mounted content; finding MIX files must not prefetch entire movie packages for enumeration. */
 export interface GuestFileEntry {
   path: string;
   size: number;
   directory?: boolean;
+  metadata?: GameFileMetadata;
 }
 
 export function guestFileSearch(pattern: string) {
