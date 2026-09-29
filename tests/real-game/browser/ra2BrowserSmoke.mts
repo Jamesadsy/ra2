@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { request } from 'node:https';
 import { join, resolve } from 'node:path';
 import { chromium, type Locator, type Page } from '@playwright/test';
@@ -10,15 +10,40 @@ const ORIGIN = process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174';
 const MENU_FRAME_SAMPLES = 6;
 const GAME_ID = process.env.RA2_BROWSER_GAME === 'yr' ? 'yr' : 'ra2';
 const IOS_HOST_MODE = process.env.RA2_BROWSER_IOS_HOST === '1';
+const TAP_TO_START = IOS_HOST_MODE && process.env.RA2_BROWSER_TAP_TO_START !== '0';
+const INITIAL_RESOLUTION = process.env.RA2_BROWSER_INITIAL_RESOLUTION ?? '1440x900';
+const EXPECTED_SELECTOR_RESOLUTION =
+  process.env.RA2_BROWSER_EXPECTED_SELECTOR_RESOLUTION ?? (INITIAL_RESOLUTION === 'none' ? '' : INITIAL_RESOLUTION);
+const EXPECTED_INITIAL_RESOLUTION =
+  process.env.RA2_BROWSER_EXPECTED_RESOLUTION ?? (INITIAL_RESOLUTION === 'none' ? '800x600' : INITIAL_RESOLUTION);
+const EXPECT_EFFECTIVE_INI_DIAGNOSTIC = process.env.RA2_BROWSER_EXPECT_INI_DIAGNOSTIC !== '0';
+const [EXPECTED_GUEST_WIDTH, EXPECTED_GUEST_HEIGHT] = EXPECTED_INITIAL_RESOLUTION.split('x').map(Number);
+const FOUR_THREE_GUEST =
+  Number.isFinite(EXPECTED_GUEST_WIDTH) &&
+  Number.isFinite(EXPECTED_GUEST_HEIGHT) &&
+  EXPECTED_GUEST_WIDTH! / EXPECTED_GUEST_HEIGHT! < 1.45;
+const WIDE_GUEST =
+  Number.isFinite(EXPECTED_GUEST_WIDTH) &&
+  Number.isFinite(EXPECTED_GUEST_HEIGHT) &&
+  EXPECTED_GUEST_WIDTH! / EXPECTED_GUEST_HEIGHT! > 1.6;
+const EVIDENCE_DIR = process.env.RA2_BROWSER_EVIDENCE_DIR;
+const PRESENTATION_ONLY = process.env.RA2_BROWSER_PRESENTATION_ONLY === '1';
+const LIFECYCLE_ONLY = process.env.RA2_BROWSER_LIFECYCLE_ONLY === '1';
+const CAMPAIGN_SELECTION_ONLY = process.env.RA2_BROWSER_CAMPAIGN_SELECTION_ONLY === '1';
+const CAMPAIGN_CHOICE = process.env.RA2_BROWSER_CAMPAIGN_CHOICE;
+const SKIP_BRIEFING_WITH_LONG_PRESS = process.env.RA2_BROWSER_SKIP_BRIEFING === '1';
 const GAME_LABEL = GAME_ID === 'yr' ? 'RA2YR' : 'RA2';
 const EXECUTABLE = GAME_ID === 'yr' ? 'gamemd.exe' : 'game.exe';
 const GAME_ROOT = resolve(process.env.RA2_GAME_ROOT || 'game');
 const GAME_ASSET_RESPONSES: Array<{ path: string; status: number }> = [];
 const GAME_ASSET_FAILURES: Array<{ path: string; error: string }> = [];
 // clickLogical takes normalized 1440x900 coordinates; RA2 and YR sidebars have different actual horizontal positions.
-const MAIN_SINGLE_PLAYER: readonly [number, number] = GAME_ID === 'yr' ? [1288, 330] : [1034, 371];
-const SINGLE_PLAYER_BACK: readonly [number, number] = GAME_ID === 'yr' ? [1288, 830] : [1034, 708];
-const SINGLE_PLAYER_CAMPAIGN: readonly [number, number] = GAME_ID === 'yr' ? [1288, 330] : [1034, 371];
+const MAIN_SINGLE_PLAYER: readonly [number, number] =
+  GAME_ID === 'yr' || FOUR_THREE_GUEST ? [1288, 330] : WIDE_GUEST ? [1080, 330] : [1034, 371];
+const SINGLE_PLAYER_BACK: readonly [number, number] =
+  GAME_ID === 'yr' || FOUR_THREE_GUEST ? [1288, 830] : WIDE_GUEST ? [1080, 840] : [1034, 708];
+const SINGLE_PLAYER_CAMPAIGN: readonly [number, number] =
+  GAME_ID === 'yr' || FOUR_THREE_GUEST ? [1288, 330] : [1034, 371];
 
 interface AudioProgressProbe {
   contextState: string;
@@ -55,6 +80,39 @@ async function readAudioProgress(page: Page): Promise<AudioProgressProbe | null>
     const probe = (window as Window & { __RA2AudioProgressProbe?: () => AudioProgressProbe }).__RA2AudioProgressProbe;
     return probe?.() ?? null;
   });
+}
+
+async function captureGuestFrame(page: Page, filename: string): Promise<void> {
+  await page.evaluate(() => {
+    const captureWindow = window as Window & { __RA2CaptureGuestFrame?: boolean; __RA2CapturedGuestFrame?: string };
+    captureWindow.__RA2CapturedGuestFrame = undefined;
+    captureWindow.__RA2CaptureGuestFrame = true;
+  });
+  await page
+    .waitForFunction(
+      () => typeof (window as Window & { __RA2CapturedGuestFrame?: string }).__RA2CapturedGuestFrame === 'string',
+      undefined,
+      { timeout: 10_000 },
+    )
+    .catch(async (error: unknown) => {
+      const diagnostics = await page.locator('#screen').evaluate((element: HTMLCanvasElement) => ({
+        shell: element.dataset.shellPage ?? null,
+        status: element.dataset.vmStatus ?? null,
+        frame: element.dataset.vmFrame ?? null,
+        batch: element.dataset.vmBatch ?? null,
+        movie: element.dataset.moviePlaybackState ?? null,
+        bink: element.dataset.vmBinkCalls ?? null,
+        battlefield: element.dataset.vmBattlefield ?? null,
+      }));
+      throw new Error(`Guest frame capture stalled: ${JSON.stringify(diagnostics)}`, { cause: error });
+    });
+  if (!EVIDENCE_DIR) return;
+  const image = await page.evaluate(
+    () => (window as Window & { __RA2CapturedGuestFrame?: string }).__RA2CapturedGuestFrame ?? '',
+  );
+  const base64 = image.replace(/^data:image\/png;base64,/, '');
+  mkdirSync(EVIDENCE_DIR, { recursive: true });
+  writeFileSync(join(EVIDENCE_DIR, filename), Buffer.from(base64, 'base64'));
 }
 
 function serverReady(): Promise<boolean> {
@@ -549,23 +607,54 @@ async function probeCampaignVideo(
     buffersAfter > buffersBefore && playsAfter > playsBefore,
     `战役过场没有建立并播放音频缓冲：CreateSoundBuffer ${buffersBefore}→${buffersAfter}，Play ${playsBefore}→${playsAfter}`,
   );
-  // Keep the original briefing on its natural campaign path. Esc used to make this smoke skip the movie,
-  // which can wedge the EA campaign before it enters the first battlefield.
-  await page.waitForFunction(
-    ({ before }) => {
-      const raw = document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmBinkCalls ?? '{}';
-      const calls = JSON.parse(raw) as Record<string, number>;
-      return (calls['BINKW32.DLL!_BinkClose@4'] ?? 0) > before;
-    },
-    { before: closesBefore },
-    { timeout: 180_000 },
-  );
-  console.log(
-    `🔬 战役过场：8 秒变化帧=${hashes.size}/32，` +
-      `BinkWait=${maxBinkWaitCalls}/500ms，声音游标=${maxSoundPositionCalls}/500ms，` +
-      `音频 buffer=${buffersBefore}→${buffersAfter}、Play=${playsBefore}→${playsAfter}；` +
-      `原始战役 briefing 自然完成 BinkClose`,
-  );
+  if (SKIP_BRIEFING_WITH_LONG_PRESS) {
+    try {
+      await page.waitForFunction(
+        () => document.querySelector<HTMLCanvasElement>('#screen')?.dataset.moviePlayback === 'skippable-briefing',
+        undefined,
+        { timeout: 30_000 },
+      );
+    } catch (error) {
+      throw new Error(
+        `Briefing skip state not detected: movie=${await canvas.getAttribute('data-movie-playback')} ` +
+          `details=${await canvas.getAttribute('data-movie-playback-state')} ` +
+          `shell=${await canvas.getAttribute('data-shell-page')} ` +
+          `status=${await canvas.getAttribute('data-vm-status')} bink=${await canvas.getAttribute('data-vm-bink-calls')}`,
+        { cause: error },
+      );
+    }
+    await dispatchTouchLongPress(page, canvas);
+    await page.waitForFunction(
+      ({ before }) => {
+        const raw = document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmBinkCalls ?? '{}';
+        const calls = JSON.parse(raw) as Record<string, number>;
+        return (calls['BINKW32.DLL!_BinkClose@4'] ?? 0) > before;
+      },
+      { before: closesBefore },
+      { timeout: 30_000 },
+    );
+    console.log(
+      `🔬 战役过场：触控长按 movie skip，BinkCloseΔ=${(callsOf(await canvas.getAttribute('data-vm-bink-calls'))['BINKW32.DLL!_BinkClose@4'] ?? 0) - closesBefore}，` +
+        `movie=${await canvas.getAttribute('data-movie-playback')}`,
+    );
+  } else {
+    // Natural completion remains the default probe; the explicit skip mode exercises the native touch gesture separately.
+    await page.waitForFunction(
+      ({ before }) => {
+        const raw = document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmBinkCalls ?? '{}';
+        const calls = JSON.parse(raw) as Record<string, number>;
+        return (calls['BINKW32.DLL!_BinkClose@4'] ?? 0) > before;
+      },
+      { before: closesBefore },
+      { timeout: 180_000 },
+    );
+    console.log(
+      `🔬 战役过场：8 秒变化帧=${hashes.size}/32，` +
+        `BinkWait=${maxBinkWaitCalls}/500ms，声音游标=${maxSoundPositionCalls}/500ms，` +
+        `音频 buffer=${buffersBefore}→${buffersAfter}、Play=${playsBefore}→${playsAfter}；` +
+        `原始战役 briefing 自然完成 BinkClose`,
+    );
+  }
 }
 
 async function clickGuest(page: Page, canvas: Locator, x: number, y: number): Promise<void> {
@@ -582,6 +671,33 @@ async function clickGuest(page: Page, canvas: Locator, x: number, y: number): Pr
   await page.mouse.down();
   await page.waitForTimeout(200);
   await page.mouse.up();
+}
+
+async function dispatchTouchLongPress(page: Page, canvas: Locator): Promise<void> {
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error('RA2 canvas 不可见，无法送出 movie 长按');
+  const clientX = box.x + box.width * 0.5;
+  const clientY = box.y + box.height * 0.5;
+  const pointerId = 37;
+  await canvas.dispatchEvent('pointerdown', {
+    pointerType: 'touch',
+    pointerId,
+    isPrimary: true,
+    clientX,
+    clientY,
+    button: 0,
+    buttons: 1,
+  });
+  await page.waitForTimeout(600);
+  await canvas.dispatchEvent('pointerup', {
+    pointerType: 'touch',
+    pointerId,
+    isPrimary: true,
+    clientX,
+    clientY,
+    button: 0,
+    buttons: 0,
+  });
 }
 
 type BattlefieldSignal = {
@@ -680,6 +796,123 @@ async function probeMainMenu(
   };
 }
 
+type NativeLifecycleMetric = Record<string, number | string | undefined>;
+
+async function nativeLifecycleRows(page: Page): Promise<NativeLifecycleMetric[]> {
+  return page.evaluate(
+    () => (window as Window & { __RA2TestNativeRows?: NativeLifecycleMetric[] }).__RA2TestNativeRows ?? [],
+  );
+}
+
+async function waitForNativeLifecycleMetric(
+  page: Page,
+  phase: string,
+  fromIndex: number,
+  timeoutMs = 12_000,
+): Promise<NativeLifecycleMetric> {
+  await page
+    .waitForFunction(
+      ({ phase: expectedPhase, fromIndex: start }) => {
+        const rows = (window as Window & { __RA2TestNativeRows?: NativeLifecycleMetric[] }).__RA2TestNativeRows ?? [];
+        return rows.slice(start).some((row) => row.event === 'lifecycle' && row.lifecyclePhase === expectedPhase);
+      },
+      { phase, fromIndex },
+      { polling: 100, timeout: timeoutMs },
+    )
+    .catch(async (error: unknown) => {
+      const rows = await nativeLifecycleRows(page);
+      throw new Error(`Lifecycle metric ${phase} timed out; recent=${JSON.stringify(rows.slice(fromIndex))}`, {
+        cause: error,
+      });
+    });
+  const rows = await nativeLifecycleRows(page);
+  return [...rows.slice(fromIndex)].reverse().find((row) => row.event === 'lifecycle' && row.lifecyclePhase === phase)!;
+}
+
+async function runShortLifecycleMatrix(page: Page, canvas: Locator): Promise<void> {
+  const cycles = [1_000, 1_000, 1_000, 5_000];
+  for (const [index, backgroundMs] of cycles.entries()) {
+    const beforeFrame = Number((await canvas.getAttribute('data-vm-frame')) ?? 0);
+    const backgroundStart = (await nativeLifecycleRows(page)).length;
+    await page.evaluate(() =>
+      (window as Window & { __RA2TestHoldAnimationFrames?: () => void }).__RA2TestHoldAnimationFrames?.(),
+    );
+    await page.evaluate(() =>
+      window.dispatchEvent(
+        new CustomEvent('ra2-native-lifecycle', { detail: { phase: 'background', nativeTimestampMs: Date.now() } }),
+      ),
+    );
+    const background = await waitForNativeLifecycleMetric(page, 'background-paused', backgroundStart);
+    assert.equal(Number(background.workerResponsive), 1, 'background Worker probe did not respond');
+    assert.equal(Number(background.guestClockPaused), 1, 'background guest clock did not pause');
+    assert.equal(Number(background.flushOk), 1, 'background writable state flush did not complete');
+    await page.waitForTimeout(backgroundMs);
+
+    const foregroundStart = (await nativeLifecycleRows(page)).length;
+    await page.evaluate(() =>
+      window.dispatchEvent(
+        new CustomEvent('ra2-native-lifecycle', { detail: { phase: 'foreground', nativeTimestampMs: Date.now() } }),
+      ),
+    );
+    const foreground = await waitForNativeLifecycleMetric(page, 'after-foreground-resume', foregroundStart);
+    await page.evaluate(() =>
+      (window as Window & { __RA2TestReleaseAnimationFrames?: () => void }).__RA2TestReleaseAnimationFrames?.(),
+    );
+    await page
+      .waitForFunction(
+        (frame) => Number(document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmFrame ?? 0) > frame,
+        beforeFrame,
+        { polling: 100, timeout: 5_000 },
+      )
+      .catch(async (error: unknown) => {
+        const rows = await nativeLifecycleRows(page);
+        const diagnostic = await canvas.evaluate((element: HTMLCanvasElement) => ({
+          frame: element.dataset.vmFrame,
+          batch: element.dataset.vmBatch,
+          status: element.dataset.vmStatus,
+          movie: element.dataset.moviePlaybackState,
+        }));
+        throw new Error(
+          `No guest frame after lifecycle cycle ${index + 1}; canvas=${JSON.stringify(diagnostic)} ` +
+            `metrics=${JSON.stringify(rows.slice(-6))}`,
+          { cause: error },
+        );
+      });
+    if (index === 0) {
+      const box = await canvas.boundingBox();
+      if (box) await page.mouse.click(box.x + box.width * 0.08, box.y + box.height * 0.08);
+      await page.evaluate(() => document.exitPointerLock());
+    }
+    const afterFrame = Number((await canvas.getAttribute('data-vm-frame')) ?? 0);
+    assert.equal(Number(foreground.workerResponsive), 1, 'foreground Worker probe did not respond');
+    if (foreground.lifecyclePaused !== undefined) {
+      assert.equal(Number(foreground.lifecyclePaused), 0, 'foreground VM remains lifecycle-paused');
+    }
+    assert.equal(Number(foreground.guestClockPaused), 0, 'foreground guest clock remains paused');
+    assert.equal(Number(foreground.safeToResume), 1, 'foreground VM failed the safe-to-resume check');
+    assert(afterFrame > beforeFrame, 'actual guest frame did not advance after foreground');
+    console.log(
+      `🔬 lifecycle A/B cycle ${index + 1} background=${backgroundMs}ms: ` +
+        `run=${background.workerRunning}->${foreground.workerRunning} ` +
+        `clock=${background.guestClockPaused}->${foreground.guestClockPaused} ` +
+        `logic=${background.guestLogicFrame}->${foreground.guestLogicFrame} ` +
+        `guestTime=${background.guestTimeMs}->${foreground.guestTimeMs} ` +
+        `frame=${beforeFrame}->${afterFrame} ` +
+        `workerFrame=${foreground.workerFrameEmittedCount}/${foreground.workerFrameAcknowledgedCount} ` +
+        `mainFrame=${foreground.mainFrameReceivedCount}/${foreground.mainFrameAcknowledgedCount} ` +
+        `pendingAck=${foreground.mainFramePendingAckId} raf=${foreground.mainFrameAckRafPending} ` +
+        `audio=${foreground.audioContextState}/${foreground.audioWorkletCount}worklets`,
+    );
+  }
+  const lastCycleStart = Math.max(0, (await nativeLifecycleRows(page)).length - 12);
+  const probe = await waitForNativeLifecycleMetric(page, 'foreground-runtime-probe', lastCycleStart, 6_000);
+  assert.equal(Number(probe.workerResponsive), 1, 'post-resume Worker health probe did not respond');
+  for (const key of ['mainFrameReceivedDelta', 'mainFrameAcknowledgedDelta', 'presentedFrameDelta'] as const) {
+    if (probe[key] !== undefined) assert(Number(probe[key]) > 0, `post-resume ${key} did not advance`);
+  }
+  console.log(`🔬 lifecycle post-resume health: ${JSON.stringify(probe)}`);
+}
+
 assert(existsSync(join(GAME_ROOT, 'ra2', EXECUTABLE)), `RA2_GAME_ROOT 缺少 ra2/${EXECUTABLE}`);
 assert(existsSync(join(GAME_ROOT, 'ra2', 'BINKW32.DLL')), 'RA2_GAME_ROOT 缺少 ra2/BINKW32.DLL');
 if (IOS_HOST_MODE) assert.equal(GAME_ID, 'ra2', 'iOS private owner mode only supports RA2');
@@ -699,16 +932,136 @@ try {
     ignoreHTTPSErrors: true,
   });
   await context.addInitScript(
-    ({ gameId, iosHost }) => {
-      localStorage.setItem('ra2-vm-preferred-game', gameId);
-      if (!localStorage.getItem(`vm-resolution-${gameId}`)) {
-        localStorage.setItem(`vm-resolution-${gameId}`, '1440x900');
+    ({ gameId, iosHost, initialResolution, captureWebGl, captureGuestFrames }) => {
+      if (captureGuestFrames) {
+        const NativeWorker = window.Worker;
+        window.Worker = class extends NativeWorker {
+          constructor(scriptURL: string | URL, options?: WorkerOptions) {
+            super(scriptURL, options);
+            this.addEventListener('message', (event: MessageEvent) => {
+              const target = window as Window & {
+                __RA2CaptureGuestFrame?: boolean;
+                __RA2CapturedGuestFrame?: string;
+              };
+              const message = event.data as {
+                type?: string;
+                frame?: {
+                  width: number;
+                  height: number;
+                  rgba?: Uint8Array;
+                  rgb565?: Uint16Array;
+                  pixels: Uint8Array;
+                  palette: Uint8Array;
+                };
+              };
+              if (!target.__RA2CaptureGuestFrame || message.type !== 'frame' || !message.frame) return;
+              const frame = message.frame;
+              const output = document.createElement('canvas');
+              output.width = frame.width;
+              output.height = frame.height;
+              const context = output.getContext('2d');
+              if (!context) return;
+              const image = context.createImageData(frame.width, frame.height);
+              if (frame.rgba) image.data.set(frame.rgba);
+              else if (frame.rgb565) {
+                for (let index = 0; index < frame.rgb565.length; index++) {
+                  const pixel = frame.rgb565[index]!;
+                  const offset = index * 4;
+                  image.data[offset] = Math.round(((pixel >>> 11) & 31) * (255 / 31));
+                  image.data[offset + 1] = Math.round(((pixel >>> 5) & 63) * (255 / 63));
+                  image.data[offset + 2] = Math.round((pixel & 31) * (255 / 31));
+                  image.data[offset + 3] = 255;
+                }
+              } else {
+                for (let index = 0; index < frame.pixels.length; index++) {
+                  const palette = frame.pixels[index]! * 4;
+                  const offset = index * 4;
+                  image.data[offset] = frame.palette[palette]!;
+                  image.data[offset + 1] = frame.palette[palette + 1]!;
+                  image.data[offset + 2] = frame.palette[palette + 2]!;
+                  image.data[offset + 3] = frame.palette[palette + 3]!;
+                }
+              }
+              context.putImageData(image, 0, 0);
+              target.__RA2CapturedGuestFrame = output.toDataURL('image/png');
+              target.__RA2CaptureGuestFrame = false;
+            });
+          }
+        };
       }
+      if (captureWebGl) {
+        const original = HTMLCanvasElement.prototype.getContext as unknown as (
+          this: HTMLCanvasElement,
+          contextId: string,
+          options?: unknown,
+        ) => RenderingContext | null;
+        HTMLCanvasElement.prototype.getContext = function (
+          this: HTMLCanvasElement,
+          contextId: string,
+          options?: unknown,
+        ): RenderingContext | null {
+          if (contextId !== 'webgl2') return original.call(this, contextId, options);
+          const attributes = {
+            ...(options && typeof options === 'object' ? options : {}),
+            preserveDrawingBuffer: true,
+          };
+          return original.call(this, contextId, attributes);
+        } as typeof HTMLCanvasElement.prototype.getContext;
+      }
+      localStorage.setItem('ra2-vm-preferred-game', gameId);
+      if (initialResolution === 'none') localStorage.removeItem(`vm-resolution-${gameId}`);
+      else if (initialResolution) localStorage.setItem(`vm-resolution-${gameId}`, initialResolution);
       localStorage.removeItem('vm-clock-rate');
-      if (iosHost) window.__RA2Host = { platform: 'ios', version: 1, ownerDataToken: 'asset-free-test-capability' };
+      if (iosHost) {
+        window.__RA2Host = { platform: 'ios', version: 1, ownerDataToken: 'asset-free-test-capability' };
+      }
     },
-    { gameId: GAME_ID, iosHost: IOS_HOST_MODE },
+    {
+      gameId: GAME_ID,
+      iosHost: IOS_HOST_MODE,
+      initialResolution: INITIAL_RESOLUTION,
+      captureWebGl: process.env.RA2_BROWSER_CAPTURE_WEBGL_BUFFER === '1',
+      captureGuestFrames: process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1',
+    },
   );
+  if (IOS_HOST_MODE && LIFECYCLE_ONLY) {
+    await context.addInitScript(`
+      window.__RA2Host = { platform: 'ios', version: 1, ownerDataToken: 'asset-free-test-capability' };
+      window.__RA2TestNativeRows = [];
+      window.__RA2NativeDiagnostics = {
+        phase: function(phase) { window.__RA2TestNativeRows.push({ event: 'phase', phase }); },
+        error: function(event, message) { window.__RA2TestNativeRows.push({ event: 'error', diagnosticEvent: event, message }); },
+        touch: function(record) { window.__RA2TestNativeRows.push(Object.assign({ event: 'touch' }, record)); },
+        metrics: function(record) { window.__RA2TestNativeRows.push(record); },
+        event: function(event) { window.__RA2TestNativeRows.push({ event: 'event', name: event }); }
+      };
+      (function() {
+        var request = window.requestAnimationFrame.bind(window);
+        var cancel = window.cancelAnimationFrame.bind(window);
+        var held = new Map();
+        var shouldHold = false;
+        window.requestAnimationFrame = function(callback) {
+          var animationId = 0;
+          animationId = request(function(timestamp) {
+            if (shouldHold) held.set(animationId, callback);
+            else callback(timestamp);
+          });
+          return animationId;
+        };
+        window.cancelAnimationFrame = function(animationId) {
+          held.delete(animationId);
+          cancel(animationId);
+        };
+        window.__RA2TestHoldAnimationFrames = function() { shouldHold = true; };
+        window.__RA2TestReleaseAnimationFrames = function() {
+          shouldHold = false;
+          var callbacks = Array.from(held.values());
+          held.clear();
+          callbacks.forEach(function(callback) { callback(performance.now()); });
+        };
+      })();
+    `);
+  }
   const page = await context.newPage();
   const pageErrors: string[] = [];
   page.on('response', (response) => {
@@ -731,6 +1084,19 @@ try {
   page.on('crash', () => console.error(`❌ ${GAME_LABEL} Chromium renderer crashed`));
   await page.goto(`${ORIGIN}/?debug=1`, { waitUntil: 'domcontentloaded' });
   const canvas = page.locator('#screen');
+  if (TAP_TO_START) {
+    const tapToStart = page.locator('#ios-tap-to-start');
+    await tapToStart.waitFor({ state: 'visible', timeout: 30_000 });
+    assert.equal(await tapToStart.count(), 1, 'iOS WebView must show exactly one Tap to Start gate');
+    await tapToStart.locator('button').click();
+    await tapToStart.waitFor({ state: 'detached', timeout: 10_000 }).catch(async (error: unknown) => {
+      const detail = await tapToStart
+        .locator('.ios-tap-start-status')
+        .textContent()
+        .catch(() => null);
+      throw new Error(`Tap to Start did not complete: ${detail ?? '(no gate error detail)'}`, { cause: error });
+    });
+  }
   if (!IOS_HOST_MODE) {
     // Local resources now require explicit selection; a fresh browser context has no IndexedDB import cache.
     await page.getByRole('button', { name: '开发测试', exact: true }).click();
@@ -743,12 +1109,58 @@ try {
   await waitForBinkOpen(page, 0, '首次主菜单');
   assert.equal(
     await page.locator('#vm-resolution').inputValue(),
-    '1440x900',
-    `${GAME_LABEL} 网页分辨率选择没有恢复 1440×900 偏好`,
+    EXPECTED_SELECTOR_RESOLUTION,
+    `${GAME_LABEL} 网页分辨率选择没有匹配启动前的保存设置`,
   );
   assert.equal(await page.getByText('客体状态', { exact: true }).count(), 0, '仍渲染无用的客体状态区块');
   await probeHostUi(page);
   const mainMenuProbe = await probeMainMenu(page, canvas);
+  const presentationProbe = await page.evaluate(() => {
+    const element = document.querySelector<HTMLCanvasElement>('#screen');
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    const gl = element.getContext('webgl2');
+    return {
+      guestResolution: element.dataset.vmResolution ?? null,
+      effectiveIniResolution: element.dataset.vmIniResolution ?? null,
+      renderer: element.dataset.vmRenderer ?? null,
+      cssWidth: rect.width,
+      cssHeight: rect.height,
+      backingWidth: element.width,
+      backingHeight: element.height,
+      devicePixelRatio: window.devicePixelRatio,
+      preserveDrawingBuffer: gl?.getContextAttributes()?.preserveDrawingBuffer ?? null,
+      webglContextLost: gl?.isContextLost() ?? null,
+      centerFramebufferRgba: (() => {
+        if (!gl) return null;
+        gl.finish();
+        const pixel = new Uint8Array(4);
+        gl.readPixels(
+          Math.floor(element.width / 2),
+          Math.floor(element.height / 2),
+          1,
+          1,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          pixel,
+        );
+        return [...pixel];
+      })(),
+    };
+  });
+  assert.equal(
+    presentationProbe?.guestResolution,
+    EXPECTED_INITIAL_RESOLUTION,
+    `${GAME_LABEL} effective guest resolution differs from the requested A/B value: ${JSON.stringify(presentationProbe)}`,
+  );
+  if (EXPECT_EFFECTIVE_INI_DIAGNOSTIC && INITIAL_RESOLUTION === 'none' && EXPECTED_INITIAL_RESOLUTION === '800x600') {
+    assert.equal(
+      presentationProbe?.effectiveIniResolution,
+      EXPECTED_INITIAL_RESOLUTION,
+      `${GAME_LABEL} effective RA2.INI did not reach the safe 800x600 fallback: ${JSON.stringify(presentationProbe)}`,
+    );
+  }
+  console.log(`🔬 Guest/display A/B: ${JSON.stringify(presentationProbe)}`);
   assert(
     mainMenuProbe.uniqueFrames >= 5,
     `主菜单视频未连续播放：${MENU_FRAME_SAMPLES} 次采样只有 ${mainMenuProbe.uniqueFrames} 张不同画面，` +
@@ -771,66 +1183,106 @@ try {
       `VM帧=${mainMenuProbe.emittedFrames}，最大调用批次=${mainMenuProbe.maxBatchCalls}/500ms，` +
       `ReadFile=${mainMenuProbe.maxReadFileCalls}/500ms`,
   );
+  if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') await captureGuestFrame(page, 'main-menu.png');
+  if (LIFECYCLE_ONLY) {
+    await runShortLifecycleMatrix(page, canvas);
+    console.log('Short lifecycle A/B matrix completed without a page reload.');
+    await browser.close();
+    server?.kill('SIGTERM');
+    process.exit(0);
+  }
+  if (PRESENTATION_ONLY) {
+    console.log(`Presentation-only A/B complete; frameSample=${await canvas.getAttribute('data-vm-frame-sample')}`);
+    await browser.close();
+    server?.kill('SIGTERM');
+    process.exit(0);
+  }
   assert.equal(await problem.count(), 0, '主菜单出现运行错误');
   await page.waitForTimeout(750);
   await clickUntilShellPage(page, canvas, 'singleplayer', ...MAIN_SINGLE_PLAYER);
   await page.waitForFunction(() => document.pointerLockElement?.id === 'screen', undefined, { timeout: 5_000 });
   await page.waitForTimeout(500);
-  // Returning to the main menu reopens the same LANGUAGE.MIX video through BinkOpen; checking only the first screen is insufficient.
-  // Do not use Esc to leave ordinary menus: RA2's legacy KillTimer/CallWindowProc chain can re-enter alongside
-  // Pointer Lock release messages at that point. Clicking the game's own Back button is the stable native path.
-  const mainMenuOpensBeforeReturn =
-    callsOf(await canvas.getAttribute('data-vm-bink-calls'))['BINKW32.DLL!_BinkOpen@8'] ?? 0;
-  await clickUntilShellPage(page, canvas, 'mainmenu', ...SINGLE_PLAYER_BACK);
-  await waitForQuietFileReads(page, canvas);
-  await waitForBinkOpen(page, mainMenuOpensBeforeReturn, '返回主菜单');
-  let returnedMainMenuProbe = await probeMainMenu(page, canvas);
-  // SetWindowText/MainMenu precedes full decoder recovery on return. If the first window still includes BinkOpen
-  // initialization, wait one tick and remeasure steady state without lowering the performance threshold.
-  if (returnedMainMenuProbe.emittedFrames < 20) {
-    await page.waitForTimeout(1_000);
-    returnedMainMenuProbe = await probeMainMenu(page, canvas);
-  }
-  assert(
-    returnedMainMenuProbe.uniqueFrames >= 5,
-    `返回主菜单后视频未继续播放：${MENU_FRAME_SAMPLES} 次采样只有 ${returnedMainMenuProbe.uniqueFrames} 张不同画面`,
-  );
-  assert(
-    returnedMainMenuProbe.emittedFrames >= 20,
-    `返回主菜单后实际输出帧过低：采样窗口只有 ${returnedMainMenuProbe.emittedFrames} 帧`,
-  );
-  if (returnedMainMenuProbe.displayedFps > 0) {
+  if (!CAMPAIGN_SELECTION_ONLY) {
+    // Returning to the main menu reopens the same LANGUAGE.MIX video through BinkOpen; checking only the first screen is insufficient.
+    // Do not use Esc to leave ordinary menus: RA2's legacy KillTimer/CallWindowProc chain can re-enter alongside
+    // Pointer Lock release messages at that point. Clicking the game's own Back button is the stable native path.
+    const mainMenuOpensBeforeReturn =
+      callsOf(await canvas.getAttribute('data-vm-bink-calls'))['BINKW32.DLL!_BinkOpen@8'] ?? 0;
+    await clickUntilShellPage(page, canvas, 'mainmenu', ...SINGLE_PLAYER_BACK);
+    await waitForQuietFileReads(page, canvas);
+    await waitForBinkOpen(page, mainMenuOpensBeforeReturn, '返回主菜单');
+    let returnedMainMenuProbe = await probeMainMenu(page, canvas);
+    // SetWindowText/MainMenu precedes full decoder recovery on return. If the first window still includes BinkOpen
+    // initialization, wait one tick and remeasure steady state without lowering the performance threshold.
+    if (returnedMainMenuProbe.emittedFrames < 20) {
+      await page.waitForTimeout(1_000);
+      returnedMainMenuProbe = await probeMainMenu(page, canvas);
+    }
     assert(
-      returnedMainMenuProbe.displayedFps >= 20,
-      `返回主菜单后显示帧率过低：${returnedMainMenuProbe.displayedFps.toFixed(1)} fps`,
+      returnedMainMenuProbe.uniqueFrames >= 5,
+      `返回主菜单后视频未继续播放：${MENU_FRAME_SAMPLES} 次采样只有 ${returnedMainMenuProbe.uniqueFrames} 张不同画面`,
+    );
+    assert(
+      returnedMainMenuProbe.emittedFrames >= 20,
+      `返回主菜单后实际输出帧过低：采样窗口只有 ${returnedMainMenuProbe.emittedFrames} 帧`,
+    );
+    if (returnedMainMenuProbe.displayedFps > 0) {
+      assert(
+        returnedMainMenuProbe.displayedFps >= 20,
+        `返回主菜单后显示帧率过低：${returnedMainMenuProbe.displayedFps.toFixed(1)} fps`,
+      );
+    }
+    console.log(
+      `🔬 返回主菜单视频：变化帧=${returnedMainMenuProbe.uniqueFrames}/${MENU_FRAME_SAMPLES}，` +
+        `显示=${returnedMainMenuProbe.displayedFps.toFixed(1)}fps，VM帧=${returnedMainMenuProbe.emittedFrames}`,
+    );
+
+    const binkCalls = JSON.parse((await canvas.getAttribute('data-vm-bink-calls')) ?? '{}') as Record<string, number>;
+    assert(
+      (binkCalls['BINKW32.DLL!_BinkOpen@8'] ?? 0) >= 2,
+      `${GAME_LABEL} 返回主菜单后没有再次执行 BinkOpen：${JSON.stringify(binkCalls)}`,
+    );
+    assert(
+      (binkCalls['BINKW32.DLL!_BinkClose@4'] ?? 0) >= 1,
+      `${GAME_LABEL} 切页没有完成 BinkClose：${JSON.stringify(binkCalls)}`,
+    );
+    assert.equal(
+      binkCalls['BINKW32.DLL!_BinkCopyToBuffer@28'] ?? 0,
+      0,
+      `${GAME_LABEL} BinkCopyToBuffer 仍在走不安全的串口 hypercall 边界`,
     );
   }
-  console.log(
-    `🔬 返回主菜单视频：变化帧=${returnedMainMenuProbe.uniqueFrames}/${MENU_FRAME_SAMPLES}，` +
-      `显示=${returnedMainMenuProbe.displayedFps.toFixed(1)}fps，VM帧=${returnedMainMenuProbe.emittedFrames}`,
-  );
 
-  const binkCalls = JSON.parse((await canvas.getAttribute('data-vm-bink-calls')) ?? '{}') as Record<string, number>;
-  assert(
-    (binkCalls['BINKW32.DLL!_BinkOpen@8'] ?? 0) >= 2,
-    `${GAME_LABEL} 返回主菜单后没有再次执行 BinkOpen：${JSON.stringify(binkCalls)}`,
-  );
-  assert(
-    (binkCalls['BINKW32.DLL!_BinkClose@4'] ?? 0) >= 1,
-    `${GAME_LABEL} 切页没有完成 BinkClose：${JSON.stringify(binkCalls)}`,
-  );
-  assert.equal(
-    binkCalls['BINKW32.DLL!_BinkCopyToBuffer@28'] ?? 0,
-    0,
-    `${GAME_LABEL} BinkCopyToBuffer 仍在走不安全的串口 hypercall 边界`,
-  );
-
-  await clickUntilShellPage(page, canvas, 'singleplayer', ...MAIN_SINGLE_PLAYER);
+  if (!CAMPAIGN_SELECTION_ONLY) await clickUntilShellPage(page, canvas, 'singleplayer', ...MAIN_SINGLE_PLAYER);
   await page.waitForTimeout(1_000);
   const campaignHoverPlayBefore =
     callsOf(await canvas.getAttribute('data-vm-audio-calls'))['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
   await clickUntilShellPage(page, canvas, 'campaign', ...SINGLE_PLAYER_CAMPAIGN);
   await page.waitForTimeout(1_000);
+  if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') await captureGuestFrame(page, 'campaign-selection.png');
+  if (CAMPAIGN_SELECTION_ONLY) {
+    if (CAMPAIGN_CHOICE === 'allied' || CAMPAIGN_CHOICE === 'soviet') {
+      const [x, y] = CAMPAIGN_CHOICE === 'allied' ? [310, 90] : [315, 375];
+      const [width, height] = ((await canvas.getAttribute('data-vm-resolution')) ?? '800x600').split('x').map(Number);
+      await clickGuest(page, canvas, Math.round((x * width!) / 800), Math.round((y * height!) / 600));
+      await page.waitForTimeout(Number(process.env.RA2_BROWSER_CAMPAIGN_ENTRY_WAIT_MS ?? 2_000));
+      if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') {
+        await captureGuestFrame(page, `${CAMPAIGN_CHOICE}-entry.png`);
+      }
+      console.log(
+        `Campaign ${CAMPAIGN_CHOICE} entry probe; shell=${await canvas.getAttribute('data-shell-page')}; ` +
+          `movie=${await canvas.getAttribute('data-movie-playback-state')}; ` +
+          `battlefield=${await canvas.getAttribute('data-vm-battlefield')}; frame=${await canvas.getAttribute('data-vm-frame')}; ` +
+          `status=${await canvas.getAttribute('data-vm-status')}; bink=${await canvas.getAttribute('data-vm-bink-calls')}`,
+      );
+    }
+    console.log(
+      `Campaign-selection-only A/B complete; frameSample=${await canvas.getAttribute('data-vm-frame-sample')}`,
+    );
+    await browser.close();
+    server?.kill('SIGTERM');
+    process.exit(0);
+  }
   await probeCampaignHover(page, canvas, campaignHoverPlayBefore);
   const campaignVideoBinkBefore = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
   const campaignVideoOpensBefore = campaignVideoBinkBefore['BINKW32.DLL!_BinkOpen@8'] ?? 0;
@@ -847,9 +1299,19 @@ try {
     [0, -10],
     [0, 10],
   ] as const;
+  const faction = CAMPAIGN_CHOICE === 'soviet' ? 'soviet' : 'allied';
+  const [factionX, factionY] = faction === 'allied' ? [310, 90] : [315, 375];
+  const [guestWidth, guestHeight] = ((await canvas.getAttribute('data-vm-resolution')) ?? '800x600')
+    .split('x')
+    .map(Number);
   for (const [offsetX, offsetY] of alliedOffsets) {
     if (!(await canvas.getAttribute('data-shell-page'))) break;
-    await clickGuest(page, canvas, 454 + offsetX, 188 + offsetY);
+    await clickGuest(
+      page,
+      canvas,
+      Math.round(((factionX + offsetX) * guestWidth!) / 800),
+      Math.round(((factionY + offsetY) * guestHeight!) / 600),
+    );
     try {
       await page.waitForFunction(
         () => !document.querySelector<HTMLCanvasElement>('#screen')?.dataset.shellPage,
@@ -883,8 +1345,8 @@ try {
   // YR keeps the shell/campaign briefing at 800x600 and reads RA2MD.INI to switch to the selected mode only on
   // entering the actual battlefield. Wait for the resolution change to avoid treating the briefing as a playable battlefield.
   await page.waitForFunction(
-    () => document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmResolution === '1440x900',
-    undefined,
+    (expected) => document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmResolution === expected,
+    EXPECTED_INITIAL_RESOLUTION,
     { timeout: 70_000 },
   );
   const playable = await waitForPlayableBattle(page, canvas, 70_000);
@@ -1023,7 +1485,11 @@ try {
     Number.isFinite(battleWidth) && Number.isFinite(battleHeight),
     `${GAME_LABEL} 战场分辨率探针无效：${battleResolution}`,
   );
-  assert.equal(battleResolution, '1440x900', `${GAME_LABEL} 未采用内存 INI 覆盖的 1440x900 战场分辨率`);
+  assert.equal(
+    battleResolution,
+    EXPECTED_INITIAL_RESOLUTION,
+    `${GAME_LABEL} 战场分辨率未采用有效 RA2.INI / 800x600 安全默认：${battleResolution}`,
+  );
   const expectedPointer = `${battleWidth! - 1},${battleHeight! - 1}/${battleResolution}`;
 
   // Headless Chromium does not generate relative movementX/Y for subsequent CDP-injected mouse.move calls,
@@ -1098,43 +1564,45 @@ try {
   const finalWorkerPointer = await canvas.getAttribute('data-vm-worker-cursor');
   const textOutCalls = Number((await canvas.getAttribute('data-vm-text-out-calls')) ?? 0);
 
-  // The native select is now hidden; a custom listbox triggers change. Use real visible options to cover safe
-  // VM disposal -> reload -> preference restoration, without waiting for the hidden select to become actionable.
-  await page.evaluate(() => document.exitPointerLock());
-  await page.waitForFunction(() => document.pointerLockElement === null, undefined, { timeout: 5_000 });
-  await page.keyboard.press('Escape');
-  await page.waitForFunction(
-    () => document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmWorkerKey === '0x101:27',
-    undefined,
-    { timeout: 5_000 },
-  );
-  await page.locator('#vm-resolution-toggle').click();
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }),
-    page.locator('#vm-resolution-options').getByRole('option', { name: '1024×768', exact: true }).click(),
-  ]);
-  // The development directory is not a player archive cache; explicitly select development resources again after reload.
   if (!IOS_HOST_MODE) {
+    // The native select is now hidden; a custom listbox triggers change. Use real visible options to cover safe
+    // VM disposal -> reload -> preference restoration, without waiting for the hidden select to become actionable.
+    await page.evaluate(() => document.exitPointerLock());
+    await page.waitForFunction(() => document.pointerLockElement === null, undefined, { timeout: 5_000 });
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => document.querySelector<HTMLCanvasElement>('#screen')?.dataset.vmWorkerKey === '0x101:27',
+      undefined,
+      { timeout: 5_000 },
+    );
+    await page.locator('#vm-resolution-toggle').click();
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }),
+      page.locator('#vm-resolution-options').getByRole('option', { name: '1024×768', exact: true }).click(),
+    ]);
+    // The development directory is not a player archive cache; explicitly select development resources again after reload.
     await page.getByRole('button', { name: '开发测试', exact: true }).click();
     await chooseLocalGameIfPrompted(page, canvas, GAME_ID === 'ra2' ? 0 : 1);
+    await expectShellPage(page, 'mainmenu', 60_000);
+    assert.equal(
+      await page.locator('#vm-resolution').inputValue(),
+      '1024x768',
+      `${GAME_LABEL} 重启后没有恢复新选择的分辨率`,
+    );
+    assert.equal(
+      await page.evaluate((gameId) => localStorage.getItem(`vm-resolution-${gameId}`), GAME_ID),
+      '1024x768',
+      `${GAME_LABEL} 分辨率没有按游戏持久化`,
+    );
   }
-  await expectShellPage(page, 'mainmenu', 60_000);
-  assert.equal(
-    await page.locator('#vm-resolution').inputValue(),
-    '1024x768',
-    `${GAME_LABEL} 重启后没有恢复新选择的分辨率`,
-  );
-  assert.equal(
-    await page.evaluate((gameId) => localStorage.getItem(`vm-resolution-${gameId}`), GAME_ID),
-    '1024x768',
-    `${GAME_LABEL} 分辨率没有按游戏持久化`,
-  );
   assert.deepEqual(pageErrors, [], `分辨率重启后浏览器页面异常：${pageErrors.join('\n')}`);
   console.log(
     `✅ ${GAME_LABEL} Chromium Worker：主菜单视频连续播放，战役流程持续运行，` +
       `Pointer Lock 前端=${finalFrontPointer}，Worker=${finalWorkerPointer}；` +
       `禁用宿主字体时 TextOutA 调用=${textOutCalls}；` +
-      `控制栏切换 1024×768 后已安全重启并恢复偏好`,
+      IOS_HOST_MODE
+      ? `iOS host mission run preserved 800x600 guest`
+      : `控制栏切换 1024×768 后已安全重启并恢复偏好`,
   );
 } finally {
   await browser.close();

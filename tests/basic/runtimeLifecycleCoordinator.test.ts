@@ -13,7 +13,9 @@ function workerSnapshot(overrides: Partial<VmLifecycleSnapshot> = {}): VmLifecyc
     guestTimeMs: 12_500,
     guestClockPaused: false,
     workerRunning: true,
+    lifecyclePaused: false,
     hypercallPending: false,
+    guestRequestPending: false,
     pendingFileReads: 0,
     pendingFileWrites: 0,
     rangePrefetchPending: false,
@@ -22,6 +24,11 @@ function workerSnapshot(overrides: Partial<VmLifecycleSnapshot> = {}): VmLifecyc
     flushOk: null,
     safeToResume: true,
     recoveryReason: null,
+    frameInFlightId: 0,
+    framePendingEmission: false,
+    frameScheduleGeneration: 0,
+    frameEmittedCount: 0,
+    frameAcknowledgedCount: 0,
     ...overrides,
   };
 }

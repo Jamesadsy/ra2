@@ -533,4 +533,41 @@ describe('DirectDraw 帧边界（原 frameBoundarySmoke）', () => {
     expect(Array.from(frames[0]!.pixels)).toEqual(new Array(16).fill(19));
     expect(scheduled, 'latest deferred snapshot should clear dirty state once').toBe(null);
   });
+
+  it('re-arms a primary frame when lifecycle cancellation discards its scheduled callback', () => {
+    const memory = createGuestMemory();
+    const frames: VmFrame[] = [];
+    const scheduled: { callback: (() => void) | null } = { callback: null };
+    const shim = createTestShim(memory, {
+      onFrame: (frame) => frames.push(frame),
+      scheduleFrame: (emit) => {
+        scheduled.callback = emit;
+      },
+      deferFrameSnapshot: true,
+    });
+    const dispatch = (key: string, args: number[]) => dispatchOk(shim, key, args);
+    const desc = 0x10_000;
+    const out = 0x10_100;
+    surfaceDesc(memory, desc);
+    dispatch('DDRAW.COM!IDirectDraw.CreateSurface', [0, desc, out, 0]);
+    const primary = readU32(memory, out);
+    const primaryDesc = 0x12_000;
+    dispatch('DDRAW.COM!IDirectDrawSurface.Lock', [primary, 0, primaryDesc, 0, 0]);
+    const pixels = readU32(memory, primaryDesc + 36);
+    memory.write_memory(new Uint8Array(16).fill(23), pixels);
+    dispatch('DDRAW.COM!IDirectDrawSurface.Unlock', [primary, pixels]);
+    const canceledBeforeBackground = scheduled.callback;
+    expect(canceledBeforeBackground).toBeTruthy();
+
+    // A suspended WKWebView can cancel the rAF callback after the guest marks the surface dirty.
+    scheduled.callback = null;
+    shim.rearmFrameForLifecycle();
+    expect(scheduled.callback, 'foreground re-arm should schedule a new primary frame').toBeTruthy();
+    const firstForegroundFrame = Reflect.get(scheduled, 'callback') as (() => void) | null;
+    scheduled.callback = null;
+    firstForegroundFrame!();
+
+    expect(frames).toHaveLength(1);
+    expect(Array.from(frames[0]!.pixels)).toEqual(new Array(16).fill(23));
+  });
 });

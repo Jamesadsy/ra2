@@ -38,6 +38,25 @@ describe('canvas 等比适配', () => {
     expect(result!.cssWidth / result!.cssHeight).toBeCloseTo(800 / 600);
   });
 
+  it('在 iPhone DPR 3 的横向安全舞台完整呈现标准 4:3 guest', () => {
+    const result = calculateCanvasFit({
+      stageWidth: 844,
+      stageHeight: 390,
+      frameWidth: 800,
+      frameHeight: 600,
+      devicePixelRatio: 3,
+    });
+    expect(result).toEqual({
+      cssWidth: 520,
+      cssHeight: 390,
+      backingWidth: 1600,
+      backingHeight: 1200,
+    });
+    expect(result!.cssWidth).toBeLessThanOrEqual(844);
+    expect(result!.cssHeight).toBeLessThanOrEqual(390);
+    expect(result!.cssWidth / result!.cssHeight).toBeCloseTo(4 / 3, 3);
+  });
+
   it('在非整数缩放和高 DPR 下仍不改变帧比例', () => {
     const result = calculateCanvasFit({
       stageWidth: 1237,

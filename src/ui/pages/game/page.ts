@@ -25,7 +25,7 @@ import { installAdaptiveTouchControls } from './touchControls';
 import { installWakeLock } from './wakeLock';
 import { createVmFrameRenderer } from './vmFrameRenderer';
 import { aiUpscaleEnabled, fsrUpscaleMode, scalefxUpscaleEnabled, spatialUpscaleEnabled } from './spatialUpscale';
-import { installCanvasFit, installGameInput, toggleImmersiveFullscreen } from './gameInput';
+import { installCanvasFit, installGameInput, setHostImmersiveMode, toggleImmersiveFullscreen } from './gameInput';
 import { installRuntimeToolbar } from './runtimeToolbar';
 import { restoreCachedGameSource } from './gameSourcePicker';
 import { progressiveFilesOf } from '../../../adapter/progressiveFiles';
@@ -38,6 +38,7 @@ import { clearCachedGameFiles, loadCustomMapFiles } from '../../../adapter/cache
 import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import { initialGameResolution, loadStoredResolution } from './vmPageResolution';
+import { createIosTapToStartGate } from './iosTapToStartGate';
 import type { GameResolution } from '../../../games/resolution';
 import { isEa108IosHost, loadEa108IosOwnerGameSource } from '../../../platform/browser/ea108MobileHost';
 import { installRuntimeLifecycleCoordinator } from '../../../adapter/runtimeLifecycleCoordinator';
@@ -60,6 +61,7 @@ let activeResourceCleanup: (() => void) | null = null;
 let activeNetworkCleanup: (() => void) | null = null;
 let pageGeneration = 0;
 let activeRendererCleanup: (() => void) | null = null;
+let activeTapStartCleanup: (() => void) | null = null;
 
 // Actual frames update guest logical coordinates; 800x600 is only a compatibility default before the first frame.
 let gameFrameWidth = 800;
@@ -70,12 +72,18 @@ let activeFitCleanup: (() => void) | null = null;
 let nativeFirstFrameAcknowledged = false;
 let presentationMetricsStartedAt = 0;
 let presentationFramesSinceMetrics = 0;
+let totalPresentedFrames = 0;
+let activeSkippableBriefingMovie = false;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
   nativeFirstFrameAcknowledged = false;
   presentationMetricsStartedAt = performance.now();
   presentationFramesSinceMetrics = 0;
+  totalPresentedFrames = 0;
+  activeSkippableBriefingMovie = false;
+  activeTapStartCleanup?.();
+  activeTapStartCleanup = null;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
   activeRendererCleanup?.();
   activeRendererCleanup = null;
@@ -129,6 +137,10 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   // Do not create the debug panel or collect samples by default: DOM updates and guest-memory sampling cost time, and the panel obscures gameplay.
   // ?debug=1 opens it at startup; otherwise the first backtick creates it lazily, and later presses toggle visibility.
   const debugAutoOpen = new URLSearchParams(window.location.search).get('debug') === '1';
+  if (debugAutoOpen) {
+    canvas.dataset.vmRenderer = frameRenderer.backend;
+    canvas.dataset.vmDevicePixelRatio = String(window.devicePixelRatio || 1);
+  }
   let status: VmStatus = { phase: 'loading', detail: t('初始化…') };
   let callCount = 0;
   let lastPointerProbeAt = 0;
@@ -157,6 +169,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     transform: (frame) => effects.transform(frame),
     presented: () => {
       presentationFramesSinceMetrics++;
+      totalPresentedFrames++;
       const metricsNow = performance.now();
       if (isEa108IosHost() && metricsNow - presentationMetricsStartedAt >= 2_000) {
         const rect = canvas.getBoundingClientRect();
@@ -443,6 +456,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   };
 
   const releaseRuntime = async () => {
+    activeTapStartCleanup?.();
+    activeTapStartCleanup = null;
     effects.stop();
     activeLifecycleCleanup?.();
     activeLifecycleCleanup = null;
@@ -498,10 +513,17 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     // cursor to current guest-frame bounds for sustained edge scrolling; ?mouse-lock=0 restores absolute coordinates.
     const mouseLock = new URLSearchParams(window.location.search).get('mouse-lock');
     const lockDesktopMouse = mouseLock === null ? true : mouseLock !== '0';
-    const installedInput = installGameInput(canvas, startedVm, lockDesktopMouse, presentHostCursor, () => ({
-      width: gameFrameWidth,
-      height: gameFrameHeight,
-    }));
+    const installedInput = installGameInput(
+      canvas,
+      startedVm,
+      lockDesktopMouse,
+      presentHostCursor,
+      () => ({
+        width: gameFrameWidth,
+        height: gameFrameHeight,
+      }),
+      () => activeSkippableBriefingMovie,
+    );
     const pointerProbeTimer = debugAutoOpen ? window.setInterval(refreshPointerProbe, 250) : null;
     adaptInputResolution = installedInput.adaptResolution;
     activeInputRelease = installedInput.release;
@@ -557,6 +579,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
               onFinishExited: finishExitedRuntime,
               onExposeRuntimeCallProbe: exposeRuntimeCallProbe,
               onAppendCall: appendCall,
+              setMoviePlaybackState: (state) => {
+                activeSkippableBriefingMovie = state.skippableBriefingActive;
+              },
             }),
             isCurrent,
           ),
@@ -566,7 +591,15 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
             startupPage: new URLSearchParams(window.location.search).get('start-page') || undefined,
             recycleFrames: true,
           },
-        );
+        ).then(async (shell) => {
+          if (!isEa108IosHost()) return shell;
+          const gate = createIosTapToStartGate(canvas, shell, isCurrent, () => setHostImmersiveMode(true));
+          const cancelGate = gate.cancel;
+          activeTapStartCleanup = cancelGate;
+          await gate.ready;
+          if (activeTapStartCleanup === cancelGate) activeTapStartCleanup = null;
+          return shell;
+        });
       }),
     (error, detail) => {
       console.error(t('[VM] 启动失败'), error);
@@ -614,6 +647,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       vm,
       () => activeInputRelease?.(),
       (reason) => showLifecycleRecoverySurface(reason),
+      () => totalPresentedFrames,
     );
   }
   toolbar.setMapsAvailable(status.phase === 'running');
@@ -714,6 +748,8 @@ async function waitForDebugRouteReady(hasFrame: () => boolean): Promise<void> {
 /** React unmount and HMR share service destruction; the service layer no longer removes UI nodes. */
 export function stopVmPage(): void {
   ++pageGeneration;
+  activeTapStartCleanup?.();
+  activeTapStartCleanup = null;
   cancelSourceRequest();
   mapRequest.getSnapshot()?.finish(false);
   activeNetworkCleanup?.();

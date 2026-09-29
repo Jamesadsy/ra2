@@ -81,6 +81,15 @@ export function withShimGraphics<TBase extends Constructor<ShimSyncChain>>(Base:
       if (primary) this.emitFrame(primary);
     }
 
+    /** Re-arm a primary-surface update whose host frame callback was canceled while requestAnimationFrame was suspended. */
+    rearmFrameForLifecycle(): void {
+      this.frameScheduled = false;
+      const primary = this.surfaces.get(this.primarySurface);
+      if (!primary || !this.options.onFrame) return;
+      primary.dirty = true;
+      this.emitFrame(primary);
+    }
+
     /** USER32 mixins may overlay independent window controls on DirectDraw presentation. */
     protected compositeWindowControls(_rgba: Uint8Array, _width: number, _height: number): void {}
     /** Independent USER32 control overlays require the RGBA composition path. */

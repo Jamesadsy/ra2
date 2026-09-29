@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
-import type { VmLifecycleReport } from '../../src/adapter/vmLifecycle';
+import type { VmAudioLifecycleSnapshot, VmLifecycleReport } from '../../src/adapter/vmLifecycle';
 import { startSessionRuntime } from '../../src/app/session/startSessionRuntime';
 
 function shell(): VmShell {
@@ -14,6 +14,7 @@ function shell(): VmShell {
       worker: {} as VmLifecycleReport['worker'],
       audio: {} as VmLifecycleReport['audio'],
     }),
+    unlockAudioForStart: async () => ({}) as VmAudioLifecycleSnapshot,
     start: async () => {},
     stop: async () => {},
     flushFiles: async () => {},

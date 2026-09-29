@@ -513,16 +513,19 @@ describe('VmWorkerController request-scoped errors', () => {
     await Promise.resolve();
     expect(frames()).toHaveLength(1);
 
-    await controller.handleMessage({ type: 'frame-ack', frameId: 99 });
+    await controller.handleMessage({ type: 'frame-ack', frameId: 99, frameGeneration: 0 });
     await Promise.resolve();
     expect(frames()).toHaveLength(1);
 
-    await controller.handleMessage({ type: 'frame-ack', frameId: 1 });
+    await controller.handleMessage({ type: 'frame-ack', frameId: 1, frameGeneration: 0 });
+    await Promise.resolve();
+    expect(frames()).toHaveLength(2);
+    await controller.handleMessage({ type: 'frame-ack', frameId: 2, frameGeneration: 0 });
     await Promise.resolve();
     expect(frames()).toHaveLength(2);
     expect(frames()[1]?.frame.pixels[0]).toBe(3);
 
-    await controller.handleMessage({ type: 'frame-ack', frameId: 1 });
+    await controller.handleMessage({ type: 'frame-ack', frameId: 1, frameGeneration: 0 });
     await Promise.resolve();
     expect(frames()).toHaveLength(2);
 
@@ -530,7 +533,7 @@ describe('VmWorkerController request-scoped errors', () => {
     await controller.handleMessage({ type: 'control', action: 'stop', requestId: 52 });
     await Promise.resolve();
     expect(frames()).toHaveLength(2);
-    await controller.handleMessage({ type: 'frame-ack', frameId: 2 });
+    await controller.handleMessage({ type: 'frame-ack', frameId: 2, frameGeneration: 1 });
     await Promise.resolve();
     expect(frames()).toHaveLength(2);
   });
@@ -548,7 +551,7 @@ describe('VmWorkerController request-scoped errors', () => {
     await Promise.resolve();
     emitFrame(2);
 
-    const acknowledging = controller.handleMessage({ type: 'frame-ack', frameId: 1 });
+    const acknowledging = controller.handleMessage({ type: 'frame-ack', frameId: 1, frameGeneration: 0 });
     const stopping = controller.handleMessage({ type: 'control', action: 'stop', requestId: 62 });
     await Promise.all([acknowledging, stopping]);
     await Promise.resolve();

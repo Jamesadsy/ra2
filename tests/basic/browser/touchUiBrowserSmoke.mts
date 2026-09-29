@@ -103,9 +103,60 @@ try {
 
       await page.evaluate(async () => {
         document.documentElement.dataset.hostPlatform = 'ios';
+        const gateUrl = '/src/ui/pages/game/iosTapToStartGate.ts';
         const stateUrl = '/src/ui/pages/game/state/uiState.ts';
+        const inputUrl = '/src/ui/pages/game/gameInput.ts';
         const { controlsCollapsed } = await import(stateUrl);
+        const { toggleImmersiveFullscreen } = (await import(
+          inputUrl
+        )) as typeof import('../../../src/ui/pages/game/gameInput');
         controlsCollapsed.set(true);
+        const canvas = document.querySelector<HTMLCanvasElement>('#screen')!;
+        let browserFullscreenCalls = 0;
+        canvas.requestFullscreen = async () => {
+          browserFullscreenCalls++;
+        };
+        await toggleImmersiveFullscreen(canvas, true);
+        (window as Window & { immersiveProbe?: number }).immersiveProbe = browserFullscreenCalls;
+        const { createIosTapToStartGate } = (await import(
+          gateUrl
+        )) as typeof import('../../../src/ui/pages/game/iosTapToStartGate');
+        let gateUnlockCalls = 0;
+        let gateStartCalls = 0;
+        const fakeVm = {
+          async unlockAudioForStart() {
+            gateUnlockCalls++;
+            return {
+              contextState: 'running',
+              contextTimeSeconds: 0,
+              unlockResult: true,
+              audioWorkletSupported: true,
+              audioWorkletModuleLoaded: true,
+              sourceCount: 0,
+              streamCount: 0,
+              workletCount: 0,
+              liveProcessorCount: 0,
+            };
+          },
+        };
+        const gate = createIosTapToStartGate(
+          canvas,
+          fakeVm as unknown as import('../../../src/adapter/vmShell').VmShell,
+          () => true,
+          () => {
+            gateStartCalls++;
+            document.documentElement.dataset.hostImmersive = 'true';
+          },
+        );
+        void gate.ready.then((ready) => {
+          const state = window as Window & { gateResult?: boolean };
+          state.gateResult = ready;
+        });
+        (window as Window & { tapGateReadCounts?: () => { unlocks: number; starts: number } }).tapGateReadCounts =
+          () => ({
+            unlocks: gateUnlockCalls,
+            starts: gateStartCalls,
+          });
       });
       await expect(rail).toHaveClass(/collapsed/);
       const compact = await page.evaluate(() => {
@@ -131,6 +182,33 @@ try {
         outsideIntercepted: false,
       });
       expect(compact.safeTop).toBeGreaterThanOrEqual(8);
+      expect(await page.evaluate(() => document.documentElement.dataset.hostImmersive)).toBe('true');
+      expect(await page.evaluate(() => (window as Window & { immersiveProbe?: number }).immersiveProbe)).toBe(0);
+      const nativeSurfaceStyles = await page.evaluate(async () => {
+        const canvas = document.querySelector('#screen')!;
+        const canvasStyle = getComputedStyle(canvas);
+        const debugStyle = getComputedStyle(document.querySelector('#vm-debug')!);
+        const styleSource = await fetch('/src/ui/pages/game/styles.css?direct').then((response) => response.text());
+        const nativeSurfaceRule =
+          styleSource.match(/html\[data-host-platform='ios'\] #screen-frame,[\s\S]*?\n\}/)?.[0] ?? '';
+        return {
+          selection: canvasStyle.userSelect,
+          nativeCalloutSuppressionScoped: nativeSurfaceRule.includes('-webkit-touch-callout: none;'),
+          debugSelection: debugStyle.userSelect,
+        };
+      });
+      expect(nativeSurfaceStyles.selection).toBe('none');
+      expect(nativeSurfaceStyles.nativeCalloutSuppressionScoped).toBe(true);
+      expect(nativeSurfaceStyles.debugSelection).not.toBe('none');
+      await expect(page.locator('#ios-tap-to-start')).toHaveCount(1);
+      await page.locator('#ios-tap-to-start button').click();
+      await expect(page.locator('#ios-tap-to-start')).toHaveCount(0);
+      expect(await page.evaluate(() => (window as Window & { gateResult?: boolean }).gateResult)).toBe(true);
+      expect(
+        await page.evaluate(() =>
+          (window as Window & { tapGateReadCounts?: () => { unlocks: number; starts: number } }).tapGateReadCounts?.(),
+        ),
+      ).toEqual({ unlocks: 1, starts: 1 });
       await page.locator('#vm-controls-toggle').click();
       await expect(rail).not.toHaveClass(/collapsed/);
       await page.locator('#vm-controls-toggle').click();

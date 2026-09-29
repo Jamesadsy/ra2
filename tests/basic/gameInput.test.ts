@@ -10,7 +10,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function setup(search = '', locked = true) {
+function setup(search = '', locked = true, movieActive = false) {
   const canvas = Object.assign(new EventTarget(), {
     style: {},
     tabIndex: 0,
@@ -59,7 +59,14 @@ function setup(search = '', locked = true) {
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
   const vm = { setCursorPosition: vi.fn(), postMessage: vi.fn(), setKeyState: vi.fn() };
   const present = vi.fn();
-  installed = installGameInput(canvas as unknown as HTMLCanvasElement, vm as unknown as VmShell, true, present);
+  installed = installGameInput(
+    canvas as unknown as HTMLCanvasElement,
+    vm as unknown as VmShell,
+    true,
+    present,
+    () => ({ width: 800, height: 600 }),
+    () => movieActive,
+  );
   const pointer = (type: string, fields: Record<string, number | boolean | string> = {}) => {
     const event = Object.assign(new Event(type, { cancelable: true }), {
       pointerType: 'mouse',
@@ -257,6 +264,32 @@ describe('iOS 触摸到原生消息映射', () => {
     vi.advanceTimersByTime(400);
     pointer('pointerup', touch(13, 200, 180));
     expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x0204, 0x0205]);
+  });
+
+  it('Briefing Bink 活跃时长按只发送一次 Esc；Battlefield 长按仍是右键', () => {
+    vi.useFakeTimers();
+    const { vm, pointer, touchReports } = setup('', false, true);
+    pointer('pointerdown', touch(31, 210, 190));
+    vi.advanceTimersByTime(400);
+    pointer('pointerup', touch(31, 210, 190));
+    expect(vm.postMessage.mock.calls.map(([message, key]) => [message, key])).toEqual([
+      [0x0100, 0x1b],
+      [0x0101, 0x1b],
+    ]);
+    expect(vm.setKeyState.mock.calls.filter(([key]) => key === 0x1b)).toEqual([
+      [0x1b, true],
+      [0x1b, false],
+    ]);
+    expect(touchReports.find((record) => record.gesture === 'movieSkipLongPress')?.wmSequence).toBe(
+      'WM_KEYDOWN>WM_KEYUP',
+    );
+
+    installed?.cleanup();
+    const gameplay = setup('', false, false);
+    gameplay.pointer('pointerdown', touch(32, 210, 190));
+    vi.advanceTimersByTime(400);
+    gameplay.pointer('pointerup', touch(32, 210, 190));
+    expect(gameplay.vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x0204, 0x0205]);
   });
 
   it('后台/失焦取消拖选时补发 UP 并清除 held input', () => {

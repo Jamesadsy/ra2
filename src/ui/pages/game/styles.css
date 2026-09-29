@@ -2283,6 +2283,77 @@ html[data-host-platform='ios'] #vm-controls.collapsed > #vm-controls-toggle {
   touch-action: manipulation;
 }
 
+/* Native gameplay/movie surfaces never expose the system text-selection menu; debug and form controls stay selectable. */
+html[data-host-platform='ios'] #screen-frame,
+html[data-host-platform='ios'] #screen-frame canvas {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* iPhone immersive mode paints edge-to-edge while keeping the playable stage inside the hardware safe area. */
+html[data-host-platform='ios'][data-host-immersive='true'] #app-layout {
+  inset: 0;
+  background: #000;
+}
+html[data-host-platform='ios'][data-host-immersive='true'] #stage {
+  margin: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+}
+
+.ios-tap-start-gate {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 20px;
+  background: rgba(5, 8, 10, 0.94);
+  color: #e4e5df;
+  text-align: center;
+  font:
+    16px/1.5 system-ui,
+    sans-serif;
+}
+.ios-tap-start-panel {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  width: min(380px, 100%);
+  padding: 24px 20px;
+  border: 1px solid rgba(216, 58, 48, 0.8);
+  background: rgba(18, 22, 24, 0.96);
+  box-shadow: 0 14px 54px rgba(0, 0, 0, 0.55);
+}
+.ios-tap-start-panel h1,
+.ios-tap-start-panel p {
+  margin: 0;
+}
+.ios-tap-start-panel h1 {
+  color: #ff6559;
+  font-size: 20px;
+}
+.ios-tap-start-panel button {
+  min-width: 150px;
+  min-height: 52px;
+  margin-top: 8px;
+  border: 1px solid #ff6559;
+  background: #7d211d;
+  color: #fff;
+  font:
+    700 16px system-ui,
+    sans-serif;
+  touch-action: manipulation;
+}
+.ios-tap-start-panel button:disabled {
+  opacity: 0.72;
+}
+.ios-tap-start-status {
+  min-height: 1.5em;
+  color: #e7b35d;
+  font-size: 13px;
+}
+
 /* Postprocessing status occupies its own next row, preserving the full effects dropdown in narrow control bars. */
 #vm-controls .reshade-controls {
   flex-wrap: wrap;

@@ -10,7 +10,13 @@ import {
   type VmInitConfig,
   type WorkerToMainMessage,
 } from './vmProtocol';
-import type { VmLifecycleAction, VmLifecycleReport, VmLifecycleSnapshot } from './vmLifecycle';
+import type {
+  VmAudioLifecycleSnapshot,
+  VmLifecycleAction,
+  VmLifecycleFramePipeline,
+  VmLifecycleReport,
+  VmLifecycleSnapshot,
+} from './vmLifecycle';
 import type { VmAttachResult, VmPointerState, VmShell } from './vmShell';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
@@ -84,6 +90,9 @@ export class WorkerVmClient implements VmShell {
   private removePagehideFlush: (() => void) | null = null;
   private frameAckRaf: number | null = null;
   private pendingFrameAck = 0;
+  private minimumFrameGeneration = 0;
+  private receivedFrameCount = 0;
+  private acknowledgedFrameCount = 0;
   private previousFrameBuffer: ArrayBuffer | null = null;
   private readonly recycleFrames: boolean;
 
@@ -140,14 +149,18 @@ export class WorkerVmClient implements VmShell {
 
   async lifecycle(action: VmLifecycleAction | 'audio-unlock'): Promise<VmLifecycleReport> {
     if (action === 'pause') {
+      this.clearPendingFrameAck();
       const worker = await this.request<VmLifecycleSnapshot>((requestId) => ({ type: 'lifecycle', action, requestId }));
+      this.minimumFrameGeneration = Math.max(this.minimumFrameGeneration, worker.frameScheduleGeneration);
+      this.clearPendingFrameAck();
       const audio = await this.audio.suspendForLifecycle();
-      return { action, worker, audio };
+      return { action, worker, audio, framePipeline: this.framePipelineSnapshot(worker) };
     }
     if (action === 'resume') {
       const worker = await this.request<VmLifecycleSnapshot>((requestId) => ({ type: 'lifecycle', action, requestId }));
+      this.minimumFrameGeneration = Math.max(this.minimumFrameGeneration, worker.frameScheduleGeneration);
       const audio = worker.safeToResume ? await this.audio.resumeForLifecycle() : this.audio.getLifecycleSnapshot();
-      return { action, worker, audio };
+      return { action, worker, audio, framePipeline: this.framePipelineSnapshot(worker) };
     }
     if (action === 'audio-unlock') {
       const [worker, unlockResult] = await Promise.all([
@@ -159,7 +172,12 @@ export class WorkerVmClient implements VmShell {
         ),
         this.audio.unlock(),
       ]);
-      return { action, worker, audio: this.audio.getLifecycleSnapshot(unlockResult) };
+      return {
+        action,
+        worker,
+        audio: this.audio.getLifecycleSnapshot(unlockResult),
+        framePipeline: this.framePipelineSnapshot(worker),
+      };
     }
     const worker = await this.request<VmLifecycleSnapshot>(
       (requestId) => ({ type: 'lifecycle', action, requestId }),
@@ -167,7 +185,17 @@ export class WorkerVmClient implements VmShell {
       false,
       3_000,
     );
-    return { action, worker, audio: this.audio.getLifecycleSnapshot() };
+    return {
+      action,
+      worker,
+      audio: this.audio.getLifecycleSnapshot(),
+      framePipeline: this.framePipelineSnapshot(worker),
+    };
+  }
+
+  async unlockAudioForStart(): Promise<VmAudioLifecycleSnapshot> {
+    const unlockResult = await this.audio.unlockForStart();
+    return this.audio.getLifecycleSnapshot(unlockResult);
   }
 
   async start(): Promise<void> {
@@ -363,6 +391,12 @@ export class WorkerVmClient implements VmShell {
       case 'shell-page':
         this.callbacks.onShellPage?.(message.title);
         break;
+      case 'movie-state':
+        this.callbacks.onMoviePlaybackState?.(message.state);
+        break;
+      case 'guest-resolution':
+        this.callbacks.onGuestResolution?.(message.resolution);
+        break;
       case 'network-status':
         this.callbacks.onNetworkStatus?.(message.status);
         break;
@@ -373,6 +407,8 @@ export class WorkerVmClient implements VmShell {
         this.callbacks.onBlocked?.(message.call);
         break;
       case 'frame':
+        if (message.frameGeneration < this.minimumFrameGeneration) break;
+        this.receivedFrameCount++;
         try {
           this.callbacks.onFrame?.(message.frame);
           if (this.recycleFrames) {
@@ -385,7 +421,7 @@ export class WorkerVmClient implements VmShell {
           }
         } finally {
           // Page callback errors must not permanently block the Worker frame pipeline.
-          this.ackFrameAtPresentationBoundary(message.frameId);
+          this.ackFrameAtPresentationBoundary(message.frameId, message.frameGeneration);
         }
         break;
       case 'game-performance-reply':
@@ -521,15 +557,38 @@ export class WorkerVmClient implements VmShell {
   /**
    * onFrame schedules the page's drawing in the same rAF cycle; schedule ACK afterward so the current frame reaches the actual display boundary before ACK releases the next frame. Paused rAF in background tabs naturally backpressures the Worker.
    */
-  private ackFrameAtPresentationBoundary(frameId: number): void {
+  private ackFrameAtPresentationBoundary(frameId: number, frameGeneration: number): void {
     this.pendingFrameAck = frameId;
     if (this.frameAckRaf !== null) return;
     this.frameAckRaf = requestAnimationFrame(() => {
       this.frameAckRaf = null;
       const acknowledged = this.pendingFrameAck;
       this.pendingFrameAck = 0;
-      if (acknowledged) this.send({ type: 'frame-ack', frameId: acknowledged });
+      if (acknowledged) {
+        this.acknowledgedFrameCount++;
+        this.send({ type: 'frame-ack', frameId: acknowledged, frameGeneration });
+      }
     });
+  }
+
+  private clearPendingFrameAck(): void {
+    if (this.frameAckRaf !== null) cancelAnimationFrame(this.frameAckRaf);
+    this.frameAckRaf = null;
+    this.pendingFrameAck = 0;
+  }
+
+  private framePipelineSnapshot(worker: VmLifecycleSnapshot): VmLifecycleFramePipeline {
+    return {
+      workerInFlightId: worker.frameInFlightId,
+      workerPendingEmission: worker.framePendingEmission,
+      workerScheduleGeneration: worker.frameScheduleGeneration,
+      workerEmittedCount: worker.frameEmittedCount,
+      workerAcknowledgedCount: worker.frameAcknowledgedCount,
+      mainPendingAckId: this.pendingFrameAck,
+      mainAckRafPending: this.frameAckRaf !== null,
+      mainReceivedCount: this.receivedFrameCount,
+      mainAcknowledgedCount: this.acknowledgedFrameCount,
+    };
   }
 
   private applyAudioOp(op: AudioOp): void {

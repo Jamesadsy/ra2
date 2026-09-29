@@ -23,7 +23,7 @@ import { WorkerVmClient, type WorkerVmClientOptions } from './vmClient';
 import type { GuestMemRecordResult } from './memRecord';
 import type { GameFileEntry, VmInitConfig } from './vmProtocol';
 import type { VmPointerState, VmShell } from './vmShell';
-import type { VmLifecycleAction, VmLifecycleReport } from './vmLifecycle';
+import type { VmAudioLifecycleSnapshot, VmLifecycleAction, VmLifecycleReport } from './vmLifecycle';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import { reportNativeRuntimeError, reportNativeRuntimePhase } from '../platform/browser/nativeDiagnostics';
 import { withGameResolutionOverride } from '../games/resolution';
@@ -303,6 +303,11 @@ export class Win32GameVm implements VmShell {
       return { action, worker, audio };
     }
     return { action, worker: this.core.getLifecycleSnapshot(), audio: this.audio.getLifecycleSnapshot() };
+  }
+
+  async unlockAudioForStart(): Promise<VmAudioLifecycleSnapshot> {
+    const unlockResult = await this.audio.unlockForStart();
+    return this.audio.getLifecycleSnapshot(unlockResult);
   }
 
   flushFiles(): Promise<void> {

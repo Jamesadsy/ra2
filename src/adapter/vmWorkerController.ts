@@ -22,7 +22,7 @@ import type { VmLifecycleSnapshot } from './vmLifecycle';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 import type { VmFrame } from '../vm86/win32';
-import { withGameResolutionOverride } from '../games/resolution';
+import { gameResolutionFromIni, gameResolutionIni, withGameResolutionOverride } from '../games/resolution';
 import { SerialTaskQueue } from '../utils/serialTaskQueue';
 import { FrameBufferPool } from './frameBufferPool';
 
@@ -187,6 +187,9 @@ export class VmWorkerController {
   private nextFrameId = 1;
   private inFlightFrameId = 0;
   private pendingFrameEmit: (() => void) | null = null;
+  private scheduledFrameEmission = false;
+  private frameEmittedCount = 0;
+  private frameAcknowledgedCount = 0;
   private readonly frameBuffers = new FrameBufferPool();
   private frameScheduleGeneration = 0;
   private readonly dependencies: Required<
@@ -225,6 +228,7 @@ export class VmWorkerController {
             this.frameScheduleGeneration++;
             this.inFlightFrameId = 0;
             this.pendingFrameEmit = null;
+            this.scheduledFrameEmission = false;
             if (this.core) await this.core.stop();
             this.started = false;
             this.post({ type: 'control-done', action: 'stop', requestId: message.requestId });
@@ -305,6 +309,7 @@ export class VmWorkerController {
             this.frameScheduleGeneration++;
             this.inFlightFrameId = 0;
             this.pendingFrameEmit = null;
+            this.scheduledFrameEmission = false;
             value =
               (await this.core.pauseForLifecycle?.()) ??
               this.core.getLifecycleSnapshot?.() ??
@@ -317,7 +322,12 @@ export class VmWorkerController {
           } else {
             value = this.core.getLifecycleSnapshot?.() ?? unavailableLifecycleSnapshot();
           }
-          this.post({ type: 'lifecycle-reply', action: message.action, requestId: message.requestId, value });
+          this.post({
+            type: 'lifecycle-reply',
+            action: message.action,
+            requestId: message.requestId,
+            value: this.withFramePipelineSnapshot(value),
+          });
           break;
         }
         case 'attach-maps': {
@@ -332,7 +342,7 @@ export class VmWorkerController {
           break;
         }
         case 'frame-ack':
-          this.acknowledgeFrame(message.frameId);
+          this.acknowledgeFrame(message.frameId, message.frameGeneration);
           break;
         case 'recycle-frame':
           this.frameBuffers.release(message.buffer);
@@ -434,6 +444,12 @@ export class VmWorkerController {
       config.playerName,
     );
     this.sourceTemplate = source.files;
+    const resolutionIni = await source.files.read(gameResolutionIni(source.game.id)).catch(() => null);
+    const effectiveResolution = resolutionIni ? gameResolutionFromIni(resolutionIni) : null;
+    this.post({
+      type: 'guest-resolution',
+      resolution: effectiveResolution ? `${effectiveResolution.width}x${effectiveResolution.height}` : null,
+    });
     const callbacks: GameVmCallbacks = {
       onNetworkStatus: (status) => this.post({ type: 'network-status', status }),
       onStatus: (status) => this.post({ type: 'status', phase: status.phase, detail: status.detail }),
@@ -444,6 +460,7 @@ export class VmWorkerController {
         this.callBatchLogicFrames++;
       },
       onShellPage: (title) => this.post({ type: 'shell-page', title }),
+      onMoviePlaybackState: (state) => this.post({ type: 'movie-state', state }),
     };
     const probe = new BrowserEmulatorProbe();
     const platform: VmCorePlatform = {
@@ -506,12 +523,14 @@ export class VmWorkerController {
 
   private sendFrame(frame: VmFrame): void {
     const frameId = this.nextFrameId++;
+    const frameGeneration = this.frameScheduleGeneration;
     this.inFlightFrameId = frameId;
+    this.frameEmittedCount++;
     const transfers: Transferable[] = [frame.pixels.buffer, frame.palette.buffer];
     if (frame.rgba) transfers.push(frame.rgba.buffer);
     if (frame.rgb565) transfers.push(frame.rgb565.buffer);
     if (frame.cursor) transfers.push(frame.cursor.rgba.buffer);
-    this.post({ type: 'frame', frameId, frame }, transfers);
+    this.post({ type: 'frame', frameId, frameGeneration, frame }, transfers);
   }
 
   private scheduleFrameWithBackpressure(emit: () => void): void {
@@ -520,24 +539,40 @@ export class VmWorkerController {
       return;
     }
     const generation = this.frameScheduleGeneration;
+    this.scheduledFrameEmission = true;
     queueMicrotask(() => {
       if (generation !== this.frameScheduleGeneration || this.inFlightFrameId) return;
+      this.scheduledFrameEmission = false;
       emit();
     });
   }
 
-  private acknowledgeFrame(frameId: number): void {
-    if (frameId !== this.inFlightFrameId) return;
+  private acknowledgeFrame(frameId: number, frameGeneration: number): void {
+    if (frameId !== this.inFlightFrameId || frameGeneration !== this.frameScheduleGeneration) return;
+    this.frameAcknowledgedCount++;
     this.inFlightFrameId = 0;
     const next = this.pendingFrameEmit;
     this.pendingFrameEmit = null;
     if (next) {
       const generation = ++this.frameScheduleGeneration;
+      this.scheduledFrameEmission = true;
       queueMicrotask(() => {
         if (generation !== this.frameScheduleGeneration || this.inFlightFrameId) return;
+        this.scheduledFrameEmission = false;
         next();
       });
     }
+  }
+
+  private withFramePipelineSnapshot(snapshot: VmLifecycleSnapshot): VmLifecycleSnapshot {
+    return {
+      ...snapshot,
+      frameInFlightId: this.inFlightFrameId,
+      framePendingEmission: this.pendingFrameEmit !== null || this.scheduledFrameEmission,
+      frameScheduleGeneration: this.frameScheduleGeneration,
+      frameEmittedCount: this.frameEmittedCount,
+      frameAcknowledgedCount: this.frameAcknowledgedCount,
+    };
   }
 }
 
@@ -554,7 +589,9 @@ function unavailableLifecycleSnapshot(): VmLifecycleSnapshot {
     guestTimeMs: null,
     guestClockPaused: false,
     workerRunning: false,
+    lifecyclePaused: false,
     hypercallPending: false,
+    guestRequestPending: false,
     pendingFileReads: 0,
     pendingFileWrites: 0,
     rangePrefetchPending: false,
@@ -563,6 +600,11 @@ function unavailableLifecycleSnapshot(): VmLifecycleSnapshot {
     flushOk: null,
     safeToResume: false,
     recoveryReason: 'runtime-unavailable',
+    frameInFlightId: 0,
+    framePendingEmission: false,
+    frameScheduleGeneration: 0,
+    frameEmittedCount: 0,
+    frameAcknowledgedCount: 0,
   };
 }
 

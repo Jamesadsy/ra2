@@ -2,7 +2,7 @@ import type { SessionRuntime } from '../app/session/runtime';
 import type { GamePerformanceSample } from '../games/performance';
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmDiagnosticAction, VmDiagnostics, VmRuntimeInfo } from './vmDiagnostics';
-import type { VmLifecycleAction, VmLifecycleReport } from './vmLifecycle';
+import type { VmAudioLifecycleSnapshot, VmLifecycleAction, VmLifecycleReport } from './vmLifecycle';
 
 /** Final input coordinates in the shim and actual presentation-surface bounds. */
 export interface VmPointerState {
@@ -42,6 +42,8 @@ export interface VmShell extends SessionRuntime {
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics>;
   /** Pause, resume, or probe the live guest and its host audio lifecycle. */
   lifecycle(action: VmLifecycleAction | 'audio-unlock'): Promise<VmLifecycleReport>;
+  /** Unlock AudioContext and prepare the PCM worklet from the trusted in-WebView start gesture. */
+  unlockAudioForStart(): Promise<VmAudioLifecycleSnapshot>;
   /** Update only the filesystem; do not restart the VM or refresh the guest map list. */
   attachMapFiles(files: ReadonlyMap<string, Uint8Array>): Promise<VmAttachResult>;
   stop(): Promise<void>;

@@ -15,6 +15,16 @@ export class Processes {
   ) {}
   private kill(child: ChildProcess, signal: NodeJS.Signals): void {
     if (!child.pid) return;
+    // Windows does not support negative PID process-group signals. Preserve descendant cleanup on POSIX, and
+    // terminate the tracked child directly on XPS/Windows so local orchestration tests and tools can shut down.
+    if (process.platform === 'win32') {
+      try {
+        child.kill(signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+      return;
+    }
     try {
       process.kill(-child.pid, signal);
     } catch (error) {

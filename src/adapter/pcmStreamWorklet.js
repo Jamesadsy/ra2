@@ -72,6 +72,15 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
         }
         break;
       }
+      case 'quiesce': {
+        if (this.state) {
+          this.state.playing = false;
+          this.port.postMessage({ kind: 'quiesced', frame: this.state.frame });
+        } else {
+          this.port.postMessage({ kind: 'quiesced', frame: 0 });
+        }
+        break;
+      }
       case 'set-loop': {
         if (this.state) this.state.loop = message.loop;
         break;
@@ -88,6 +97,7 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
         this.state = null;
         if (!this.destroyed) liveProcessors--; // A repeated destroy must not double-count.
         this.destroyed = true;
+        this.port.postMessage({ kind: 'destroyed', live: liveProcessors });
         break;
       }
     }

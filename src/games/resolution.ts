@@ -96,6 +96,44 @@ export function patchGameResolutionIni(bytes: Uint8Array, resolution: GameResolu
   return latin1ToBytes(lines.join(newline) + (trailingNewline ? newline : ''));
 }
 
+/** Read the selected standard guest mode without returning other user INI settings. */
+export function gameResolutionFromIni(bytes: Uint8Array): GameResolution | null {
+  const lines = bytesToLatin1(bytes).split(/\r\n|\n|\r/);
+  const videoStart = lines.findIndex((line) => /^\s*\[video\]\s*$/i.test(line));
+  if (videoStart < 0) return null;
+  const videoEnd = lines.findIndex((line, index) => index > videoStart && /^\s*\[[^\]]+\]\s*$/.test(line));
+  let width: string | null = null;
+  let height: string | null = null;
+  for (const line of lines.slice(videoStart + 1, videoEnd < 0 ? undefined : videoEnd)) {
+    const match = line.match(/^\s*([^=;#]+?)\s*=\s*([^;#]*?)\s*$/);
+    if (!match) continue;
+    const key = match[1]!.trim().toLowerCase();
+    if (key === 'screenwidth') width = match[2]!.trim();
+    else if (key === 'screenheight') height = match[2]!.trim();
+  }
+  if (!width || !height || !/^\d+$/.test(width) || !/^\d+$/.test(height)) return null;
+  const parsedWidth = Number(width);
+  const parsedHeight = Number(height);
+  // Existing user INIs may contain valid display modes outside the selector's curated choices. Keep those modes
+  // intact as long as they are plausible guest dimensions; explicit UI selections remain restricted to GAME_RESOLUTIONS.
+  if (
+    !Number.isSafeInteger(parsedWidth) ||
+    !Number.isSafeInteger(parsedHeight) ||
+    parsedWidth < 320 ||
+    parsedHeight < 200 ||
+    parsedWidth > 8192 ||
+    parsedHeight > 8192
+  ) {
+    return null;
+  }
+  return { width: parsedWidth, height: parsedHeight };
+}
+
+/** Return whether an existing INI has a plausible complete guest mode. */
+function hasUsableGameResolutionIni(bytes: Uint8Array): boolean {
+  return gameResolutionFromIni(bytes) !== null;
+}
+
 /** Default menu resolution when an online package has no INI: the standard RA2 menu setting. */
 const FALLBACK_RESOLUTION: GameResolution = { width: 800, height: 600 };
 
@@ -106,10 +144,9 @@ export async function withGameResolutionOverride(
 ): Promise<GameSource> {
   const iniPath = gameResolutionIni(source.game.id);
   const original = await source.files.read(iniPath);
-  // Use an existing INI unchanged if no modification was requested, preserving the player's settings and resolution.
-  if (!resolution && original !== null) return source;
-  // Without an INI in the online package, supply a properly formatted default even without a resolution request; missing,
-  // empty, or leading-blank-line INIs cause an observed 640x400 intro fallback and hang.
+  // Preserve a usable player setting unchanged. An absent, empty, malformed, or incomplete Video mode uses the
+  // established 800x600 guest fallback so the game cannot silently choose an unsafe display mode.
+  if (!resolution && original !== null && hasUsableGameResolutionIni(original)) return source;
   const applied = resolution ?? FALLBACK_RESOLUTION;
   const patched = patchGameResolutionIni(original ?? new Uint8Array(), applied);
   return {

@@ -9,6 +9,7 @@ let canvasFitObserver: ResizeObserver | null = null;
 let canvasDprQuery: MediaQueryList | null = null;
 let canvasDprFitListener: (() => void) | null = null;
 let canvasFullscreenFitListener: (() => void) | null = null;
+let canvasImmersiveFitListener: (() => void) | null = null;
 
 /**
  * Page shortcuts bypass game injection in installGameInput keydown/keyup and are handled centrally here.
@@ -33,7 +34,20 @@ function currentCanvasRect(canvas: HTMLCanvasElement): { left: number; top: numb
 }
 
 /** Fullscreen frame and lock hints, excluding toolbar/debug layers; input lifecycle owns keyboard locking. */
-export async function toggleImmersiveFullscreen(canvas: HTMLCanvasElement): Promise<void> {
+export function isHostImmersiveMode(): boolean {
+  return document.documentElement.dataset.hostImmersive === 'true';
+}
+
+export function setHostImmersiveMode(enabled: boolean): void {
+  document.documentElement.dataset.hostImmersive = String(enabled);
+  window.dispatchEvent(new Event('ra2-host-immersivechange'));
+}
+
+export async function toggleImmersiveFullscreen(canvas: HTMLCanvasElement, nativeIosHost = false): Promise<void> {
+  if (nativeIosHost) {
+    setHostImmersiveMode(!isHostImmersiveMode());
+    return;
+  }
   if (document.fullscreenElement) {
     await document.exitFullscreen();
   } else {
@@ -147,6 +161,10 @@ export function installCanvasFit(
   if (canvasFullscreenFitListener) document.removeEventListener('fullscreenchange', canvasFullscreenFitListener);
   document.addEventListener('fullscreenchange', fitEnvironmentChange);
   canvasFullscreenFitListener = fitEnvironmentChange;
+  const fitImmersiveChange = () => fit();
+  if (canvasImmersiveFitListener) window.removeEventListener('ra2-host-immersivechange', canvasImmersiveFitListener);
+  window.addEventListener('ra2-host-immersivechange', fitImmersiveChange);
+  canvasImmersiveFitListener = fitImmersiveChange;
   fit();
   ready = true;
   const observer = canvasFitObserver,
@@ -157,12 +175,14 @@ export function installCanvasFit(
       observer.disconnect();
       query.removeEventListener('change', fitEnvironmentChange);
       document.removeEventListener('fullscreenchange', fitEnvironmentChange);
+      window.removeEventListener('ra2-host-immersivechange', fitImmersiveChange);
       if (canvasFitObserver === observer) canvasFitObserver = null;
       if (canvasDprQuery === query) {
         canvasDprQuery = null;
         canvasDprFitListener = null;
       }
       if (canvasFullscreenFitListener === fitEnvironmentChange) canvasFullscreenFitListener = null;
+      if (canvasImmersiveFitListener === fitImmersiveChange) canvasImmersiveFitListener = null;
     },
   });
 }
@@ -179,6 +199,7 @@ export function installGameInput(
   lockDesktopMouse = true,
   onCursorPresentation?: (x: number, y: number, visible: boolean) => void,
   getFrameSize: GameFrameSizeProvider = () => ({ width: 800, height: 600 }),
+  isSkippableMovieActive: () => boolean = () => false,
 ): InstalledGameInput {
   // Retain system mouse acceleration/speed by default; raw counts are not the system cursor's screen displacement.
   // Only explicit ?raw-mouse=1 bypasses system adjustment; never enable it automatically on Windows.
@@ -225,8 +246,9 @@ export function installGameInput(
   const reconciledModifiers = new Map<number, string>();
 
   // ---- Touch gesture state machine ----
-  // Delay touch DOWN until the gesture is identified as tap, drag, or long-press right-click, ensuring:
-  // 1) 400ms long press means right-click; 2) double taps retain two complete physical clicks;
+  // Delay touch DOWN until the gesture is identified as tap, drag, or long-press action, ensuring:
+  // 1) a 400ms long press is right-click except during an active skippable briefing, where it sends one Esc pair;
+  // 2) double taps retain two complete physical clicks;
   // 3) drag sends left DOWN at the original contact point. USER32 generates double-click messages from window-class styles.
   // Two-finger trackpad semantics: tap means right-click; drag holds right-click for native map panning.
   // The cursor always follows the primary finger and the map pans 1:1, leaving the cursor at the release point.
@@ -235,7 +257,7 @@ export function installGameInput(
   // See handleTouchPointerMove for the drag threshold, expressed in game pixels and adapted to canvas scaling.
   interface TouchGesture {
     pointerId: number;
-    phase: 'pending' | 'drag' | 'right' | 'two-pending' | 'two-drag';
+    phase: 'pending' | 'drag' | 'right' | 'movie-skip' | 'two-pending' | 'two-drag';
     downX: number;
     downY: number;
     downLParam: number;
@@ -570,6 +592,25 @@ export function installGameInput(
   const touchHoldTimer = () => {
     const state = touchGesture;
     if (!state || state.phase !== 'pending') return;
+    if (isSkippableMovieActive()) {
+      state.phase = 'movie-skip';
+      const escape = {
+        code: 'Escape',
+        key: 'Escape',
+        location: 0,
+        altKey: false,
+        ctrlKey: false,
+        metaKey: false,
+      };
+      vm.setKeyState(0x1b, true);
+      vm.postMessage(0x0100, 0x1b, keyLParam(escape, false, false));
+      recordTouchMessage('WM_KEYDOWN', 0, state.downLParam);
+      vm.setKeyState(0x1b, false);
+      vm.postMessage(0x0101, 0x1b, keyLParam(escape, true, true));
+      recordTouchMessage('WM_KEYUP', 0, state.downLParam);
+      reportGesture('movieSkipLongPress');
+      return;
+    }
     state.phase = 'right';
     reportGesture('longPress');
     mouseFlags |= 0x0002;
@@ -720,7 +761,8 @@ export function installGameInput(
     touchPoints.delete(event.pointerId);
     const state = touchGesture;
     if (!state) return;
-    const single = state.phase === 'pending' || state.phase === 'drag' || state.phase === 'right';
+    const single =
+      state.phase === 'pending' || state.phase === 'drag' || state.phase === 'right' || state.phase === 'movie-skip';
     if (single) {
       if (event.pointerId !== state.pointerId) return;
       clearTouchTimer();
@@ -741,7 +783,7 @@ export function installGameInput(
         const upModifiers = modifiers & ~0x0001;
         vm.postMessage(0x0202, upModifiers, upLParam);
         recordTouchMessage('WM_LBUTTONUP', upModifiers, upLParam);
-      } else {
+      } else if (state.phase === 'right') {
         mouseFlags &= ~0x0002;
         vm.setKeyState(0x02, false);
         const upModifiers = modifiers & ~0x0002;
@@ -749,7 +791,13 @@ export function installGameInput(
         recordTouchMessage('WM_RBUTTONUP', upModifiers, upLParam);
       }
       reportGesture(
-        state.phase === 'pending' ? 'singleTap' : state.phase === 'drag' ? 'selectionReplaced' : 'released',
+        state.phase === 'pending'
+          ? 'singleTap'
+          : state.phase === 'drag'
+            ? 'selectionReplaced'
+            : state.phase === 'movie-skip'
+              ? 'movieSkipReleased'
+              : 'released',
         event,
         {
           logicalEndX: upLParam & 0xffff,

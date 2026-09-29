@@ -7,6 +7,7 @@ import type { VmShell } from '../../../adapter/vmShell';
 import type { GameVmCallbacks } from '../../../app/session/runtimeEvents';
 import type { VmStatus } from '../../../app/session/runtimeEvents';
 import type { Win32Call } from '../../../vm86/win32';
+import type { VmMoviePlaybackState } from '../../../contracts/moviePlayback';
 import type { SupportedGameId } from '../../../games/catalog';
 import type { LiveModelId } from './experiments/modelProbe';
 import type { FrameEffectController } from '../../../app/session/frameEffectController';
@@ -41,6 +42,7 @@ export interface VmPageRuntimeCallbackDeps {
   onFinishExited: (detail: string) => void;
   onExposeRuntimeCallProbe: () => void;
   onAppendCall: (lines: string[], call: Win32Call, ordinal: number, suffix?: string) => void;
+  setMoviePlaybackState: (state: VmMoviePlaybackState) => void;
 }
 
 export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameVmCallbacks {
@@ -68,6 +70,7 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
     onFinishExited,
     onExposeRuntimeCallProbe,
     onAppendCall,
+    setMoviePlaybackState,
   } = deps;
   return {
     onNetworkStatus(next) {
@@ -94,6 +97,14 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
     onShellPage(title) {
       if (title) canvas.dataset.shellPage = title;
       else delete canvas.dataset.shellPage;
+    },
+    onMoviePlaybackState(state) {
+      canvas.dataset.moviePlayback = state.skippableBriefingActive ? 'skippable-briefing' : 'not-skippable';
+      canvas.dataset.moviePlaybackState = JSON.stringify(state);
+      setMoviePlaybackState(state);
+    },
+    onGuestResolution(resolution) {
+      canvas.dataset.vmIniResolution = resolution ?? 'missing-or-unusable';
     },
     onCall(call, ordinal) {
       setCallCount(ordinal);

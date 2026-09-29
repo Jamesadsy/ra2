@@ -124,6 +124,7 @@ export class VmCore {
   private guestLogicFrame = 0;
   private calls = 0;
   private readonly recentCalls: string[] = [];
+  private lastMoviePlaybackState = '';
   private lastCallStack: { key: string; stack: number; returnAddress: number } | null = null;
   private readonly pendingFileWrites = new Set<Promise<void>>();
   private pendingFileWriteError: Error | null = null;
@@ -339,8 +340,8 @@ export class VmCore {
       this.lifecyclePaused = true;
       this.lifecycleCycles++;
       this.clearPoll();
-      const emulator = this.emulator;
-      if (emulator?.is_running()) await emulator.stop();
+      // WKWebView may suspend its Worker naturally. Keep the v86 CPU instance alive so foreground does not
+      // depend on an undocumented stop()/run() round-trip preserving guest and device state.
       this.shim?.pauseGuestClockForLifecycle();
       try {
         await this.flushFiles();
@@ -373,10 +374,27 @@ export class VmCore {
     }
 
     try {
-      await emulator.run();
+      // Resume the retained CPU when WebKit left it running; recover with run() only if the Worker was
+      // actually stopped by the host while backgrounded.
+      if (!emulator.is_running()) await emulator.run();
       this.lifecyclePaused = false;
       this.lifecycleFlushOk = null;
+      shim.rearmFrameForLifecycle?.();
       this.startPolling();
+      // Drain the guest request that was already on the UART boundary when WebKit suspended the Worker.
+      // Returning before this poll settles makes the coordinator mistake that expected in-flight hypercall for
+      // an unrecoverable pending read and can leave the guest clock paused after a coherent resume.
+      await this.poll();
+      const settleDeadline = performance.now() + timeoutMs;
+      while (this.handling && performance.now() < settleDeadline) {
+        await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 20));
+      }
+      if (this.handling || this.pendingFileReads > 0) {
+        this.lifecyclePaused = true;
+        this.clearPoll();
+        shim.pauseGuestClockForLifecycle();
+        return this.getLifecycleSnapshot('pending-read');
+      }
       return this.getLifecycleSnapshot();
     } catch {
       shim.pauseGuestClockForLifecycle();
@@ -388,6 +406,7 @@ export class VmCore {
     const clock = this.shim?.inspectGuestClockForLifecycle();
     const range = this.rangePrefetch.snapshot();
     const runtimeAvailable = !!this.emulator && !!this.shim && this.currentPhase === 'running';
+    const guestRequestPending = this.hasPendingGuestRequest();
     const recoveryReason =
       recoveryReasonOverride ??
       (runtimeAvailable
@@ -404,7 +423,9 @@ export class VmCore {
       guestTimeMs: clock?.guestTimeMs ?? null,
       guestClockPaused: clock?.paused ?? false,
       workerRunning: this.emulator?.is_running() ?? false,
-      hypercallPending: this.handling,
+      lifecyclePaused: this.lifecyclePaused,
+      hypercallPending: this.handling || guestRequestPending,
+      guestRequestPending,
       pendingFileReads: this.pendingFileReads,
       pendingFileWrites: this.pendingFileWrites.size,
       rangePrefetchPending: range.pending,
@@ -413,6 +434,11 @@ export class VmCore {
       flushOk: this.lifecycleFlushOk,
       safeToResume: recoveryReason === null,
       recoveryReason,
+      frameInFlightId: 0,
+      framePendingEmission: false,
+      frameScheduleGeneration: 0,
+      frameEmittedCount: 0,
+      frameAcknowledgedCount: 0,
     };
   }
 
@@ -732,10 +758,13 @@ export class VmCore {
 
       const result = this.shim.dispatch(call);
       const shellPageTitle = this.shim.inspectShellPageTitle();
+      let shellPageChanged = false;
       if (shellPageTitle !== this.lastShellPageTitle) {
         this.lastShellPageTitle = shellPageTitle;
+        shellPageChanged = true;
         this.callbacks.onShellPage?.(shellPageTitle);
       }
+      if (shellPageChanged || imported.key.startsWith('BINKW32.DLL!')) this.publishMoviePlaybackState();
       if (!result) {
         this.clearPoll();
         if (this.emulator.is_running()) await this.emulator.stop();
@@ -807,6 +836,15 @@ export class VmCore {
   private readU32(address: number): number {
     const b = this.emulator!.read_memory(address, 4);
     return (b[0]! | (b[1]! << 8) | (b[2]! << 16) | (b[3]! << 24)) >>> 0;
+  }
+
+  private hasPendingGuestRequest(): boolean {
+    if (!this.emulator || !this.image) return false;
+    try {
+      return this.readU32(HYPERCALL_REQUEST) !== 0;
+    } catch {
+      return false;
+    }
   }
 
   private writeU32(address: number, value: number): void {
@@ -904,6 +942,15 @@ export class VmCore {
     this.pollTimer = null;
     if (this.diagnosticsTimer !== null) globalThis.clearInterval(this.diagnosticsTimer);
     this.diagnosticsTimer = null;
+  }
+
+  private publishMoviePlaybackState(): void {
+    const state = this.shim?.inspectMoviePlaybackState();
+    if (!state) return;
+    const serialized = JSON.stringify(state);
+    if (serialized === this.lastMoviePlaybackState) return;
+    this.lastMoviePlaybackState = serialized;
+    this.callbacks.onMoviePlaybackState?.(state);
   }
 
   private startPolling(): void {

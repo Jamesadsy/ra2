@@ -7,7 +7,9 @@ export interface VmLifecycleSnapshot {
   guestTimeMs: number | null;
   guestClockPaused: boolean;
   workerRunning: boolean;
+  lifecyclePaused: boolean;
   hypercallPending: boolean;
+  guestRequestPending: boolean;
   pendingFileReads: number;
   pendingFileWrites: number;
   rangePrefetchPending: boolean;
@@ -16,12 +18,32 @@ export interface VmLifecycleSnapshot {
   flushOk: boolean | null;
   safeToResume: boolean;
   recoveryReason: 'pending-read' | 'flush-failed' | 'runtime-unavailable' | null;
+  frameInFlightId: number;
+  framePendingEmission: boolean;
+  frameScheduleGeneration: number;
+  frameEmittedCount: number;
+  frameAcknowledgedCount: number;
+}
+
+export interface VmLifecycleFramePipeline {
+  workerInFlightId: number;
+  workerPendingEmission: boolean;
+  workerScheduleGeneration: number;
+  workerEmittedCount: number;
+  workerAcknowledgedCount: number;
+  mainPendingAckId: number;
+  mainAckRafPending: boolean;
+  mainReceivedCount: number;
+  mainAcknowledgedCount: number;
 }
 
 export interface VmAudioLifecycleSnapshot {
   contextState: string;
   contextTimeSeconds: number | null;
   contextSampleRateHz: number | null;
+  lastWorkletCursorUpdateAgeMs?: number | null;
+  audioWorkletSupported?: boolean;
+  audioWorkletModuleLoaded?: boolean;
   playingBuffers: number;
   sourceCount: number;
   streamCount: number;
@@ -63,4 +85,5 @@ export interface VmLifecycleReport {
   action: VmLifecycleAction | 'audio-unlock';
   worker: VmLifecycleSnapshot;
   audio: VmAudioLifecycleSnapshot;
+  framePipeline?: VmLifecycleFramePipeline;
 }

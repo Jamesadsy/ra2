@@ -117,9 +117,9 @@ describe('WorkerVmClient RPC lifecycle', () => {
     worker.postMessage = (message: unknown, transfer: Transferable[] = []) => {
       worker.posts.push(structuredClone(message, { transfer }));
     };
-    worker.emit({ type: 'frame', frameId: 1, frame: frames[0]! });
+    worker.emit({ type: 'frame', frameId: 1, frameGeneration: 0, frame: frames[0]! });
     expect(worker.posts.some((item: any) => item.type === 'recycle-frame')).toBe(false);
-    worker.emit({ type: 'frame', frameId: 2, frame: frames[1]! });
+    worker.emit({ type: 'frame', frameId: 2, frameGeneration: 0, frame: frames[1]! });
     const recycled = worker.posts.filter((item: any) => item.type === 'recycle-frame') as Array<{
       buffer: ArrayBuffer;
     }>;
@@ -266,7 +266,9 @@ describe('WorkerVmClient RPC lifecycle', () => {
       guestTimeMs: 1_200,
       guestClockPaused: false,
       workerRunning: true,
+      lifecyclePaused: false,
       hypercallPending: false,
+      guestRequestPending: false,
       pendingFileReads: 0,
       pendingFileWrites: 0,
       rangePrefetchPending: false,
@@ -275,6 +277,11 @@ describe('WorkerVmClient RPC lifecycle', () => {
       flushOk: null,
       safeToResume: true,
       recoveryReason: null,
+      frameInFlightId: 0,
+      framePendingEmission: false,
+      frameScheduleGeneration: 0,
+      frameEmittedCount: 0,
+      frameAcknowledgedCount: 0,
     };
     const audio = {
       ...fakeAudio(),
@@ -312,6 +319,21 @@ describe('WorkerVmClient RPC lifecycle', () => {
     await Promise.resolve();
     worker.emit({ type: 'flush-done', requestId: requestId(worker, 'flush') });
     await destroying;
+  });
+
+  it('unlocks start audio without probing an uninitialized Worker VM', async () => {
+    const unlockForStart = vi.fn(async () => true);
+    const audioSnapshot = { contextState: 'running', unlockResult: true } as unknown as VmAudioLifecycleSnapshot;
+    const audio = {
+      ...fakeAudio(),
+      unlockForStart,
+      getLifecycleSnapshot: vi.fn(() => audioSnapshot),
+    } as unknown as WebAudioPcmSink;
+    const { worker, client } = setup({ audio });
+
+    await expect(client.unlockAudioForStart()).resolves.toBe(audioSnapshot);
+    expect(unlockForStart).toHaveBeenCalledOnce();
+    expect(worker.posts.filter((item) => (item as { type?: string }).type === 'lifecycle')).toHaveLength(0);
   });
 
   it('rejects and removes a request-scoped worker error without killing the worker', async () => {
@@ -437,14 +459,14 @@ describe('WorkerVmClient RPC lifecycle', () => {
     };
     const { worker, client } = setup({}, { onFrame: vi.fn() });
 
-    worker.emit({ type: 'frame', frameId: 7, frame });
+    worker.emit({ type: 'frame', frameId: 7, frameGeneration: 0, frame });
     expect(worker.posts.some((item) => (item as { type?: string }).type === 'frame-ack')).toBe(false);
     const firstRaf = [...frameCallbacks.keys()][0]!;
     frameCallbacks.get(firstRaf)?.(0);
     frameCallbacks.delete(firstRaf);
-    expect(worker.posts).toContainEqual({ type: 'frame-ack', frameId: 7 });
+    expect(worker.posts).toContainEqual({ type: 'frame-ack', frameId: 7, frameGeneration: 0 });
 
-    worker.emit({ type: 'frame', frameId: 8, frame });
+    worker.emit({ type: 'frame', frameId: 8, frameGeneration: 0, frame });
     const secondRaf = [...frameCallbacks.keys()][0]!;
     const destroying = client.destroy();
     expect(cancelled).toContain(secondRaf);
@@ -454,7 +476,7 @@ describe('WorkerVmClient RPC lifecycle', () => {
     worker.emit({ type: 'flush-done', requestId: requestId(worker, 'flush') });
     await destroying;
     expect(worker.posts.filter((item) => (item as { type?: string }).type === 'frame-ack')).toEqual([
-      { type: 'frame-ack', frameId: 7 },
+      { type: 'frame-ack', frameId: 7, frameGeneration: 0 },
     ]);
   });
 

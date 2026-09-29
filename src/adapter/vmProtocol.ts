@@ -9,6 +9,7 @@ import type { VmCallBatch, VmPhase } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
 import type { Ra2NetworkConfig } from '../games/ra2/networkTransport';
 import type { VmLifecycleAction, VmLifecycleSnapshot } from './vmLifecycle';
+import type { VmMoviePlaybackState } from '../contracts/moviePlayback';
 
 /** Main-thread/Worker message protocol. Array fields (PCM/frames/EXE) transfer ownership; a single FIFO channel preserves order. */
 
@@ -71,7 +72,7 @@ export type MainToWorkerMessage =
   | { type: 'mem-record-start'; requestId: number }
   | { type: 'mem-record-stop'; requestId: number }
   /** The main thread consumed this frame at a display-refresh boundary; the Worker may release the next frame. */
-  | { type: 'frame-ack'; frameId: number }
+  | { type: 'frame-ack'; frameId: number; frameGeneration: number }
   /** Previous frame no longer referenced by the page; separate from ACK because the current frame is still needed for cursor redraws. */
   | { type: 'recycle-frame'; buffer: ArrayBuffer }
   | { type: 'flush'; requestId: number }
@@ -87,9 +88,11 @@ export type WorkerToMainMessage =
   | { type: 'probe'; ready: true }
   | { type: 'status'; phase: VmPhase; detail: string }
   | { type: 'shell-page'; title: string }
+  | { type: 'movie-state'; state: VmMoviePlaybackState }
+  | { type: 'guest-resolution'; resolution: string | null }
   | { type: 'call-batch'; batch: VmCallBatch }
   | { type: 'blocked'; call: Win32Call }
-  | { type: 'frame'; frameId: number; frame: VmFrame }
+  | { type: 'frame'; frameId: number; frameGeneration: number; frame: VmFrame }
   | {
       type: 'state-reply';
       requestId: number;

@@ -75,6 +75,8 @@ interface PcmBufferState {
   frequencyChangeCount: number;
   /** Context time of the latest worklet position message, used as the cursor extrapolation baseline. */
   workletPositionAt: number;
+  /** Wall-clock age remains meaningful while AudioContext.currentTime is suspended. */
+  workletPositionUpdatedAtMs: number | null;
   gain: GainNode | null;
   panner: StereoPannerNode | null;
   positionBytes: number;
@@ -116,6 +118,8 @@ export const DEFAULT_VOLUME_PERCENT = Math.round(Math.sqrt(DEFAULT_MASTER_VOLUME
 
 export class WebAudioPcmSink {
   private readonly buffers = new Map<PcmBufferId, PcmBufferState>();
+  private readonly workletQuiesceResolvers = new WeakMap<AudioWorkletNode, () => void>();
+  private readonly workletDestroyResolvers = new WeakMap<AudioWorkletNode, () => void>();
   private context: AudioContext | null = null;
   private destroyed = false;
   private masterGain: GainNode | null = null;
@@ -168,6 +172,7 @@ export class WebAudioPcmSink {
       writeCount: 0,
       frequencyChangeCount: 0,
       workletPositionAt: 0,
+      workletPositionUpdatedAtMs: null,
       gain: null,
       panner: null,
       positionBytes: 0,
@@ -395,6 +400,10 @@ export class WebAudioPcmSink {
     const context = this.context;
     const now = context?.currentTime ?? null;
     const playing = [...this.buffers.values()].filter((state) => state.playing);
+    const cursorAges = [...this.buffers.values()]
+      .map((state) => state.workletPositionUpdatedAtMs)
+      .filter((updatedAt): updatedAt is number => updatedAt !== null)
+      .map((updatedAt) => Math.max(0, performance.now() - updatedAt));
     let staleWorklets = 0;
     for (const state of playing) {
       if (state.worklet && context?.state === 'running' && now !== null && now - state.workletPositionAt > 1) {
@@ -405,6 +414,9 @@ export class WebAudioPcmSink {
       contextState: context?.state ?? 'uncreated',
       contextTimeSeconds: now,
       contextSampleRateHz: context?.sampleRate ?? null,
+      lastWorkletCursorUpdateAgeMs: cursorAges.length ? Math.max(...cursorAges) : null,
+      audioWorkletSupported: !!context?.audioWorklet && typeof AudioWorkletNode !== 'undefined',
+      audioWorkletModuleLoaded: !!context && workletModules.has(context),
       playingBuffers: playing.length,
       sourceCount: playing.filter((state) => state.source).length,
       streamCount: playing.filter((state) => state.stream).length,
@@ -467,8 +479,18 @@ export class WebAudioPcmSink {
           ? Math.floor(state.streamFrame) * state.format.nBlockAlign
           : this.currentPosition(state);
       }
-      this.detachPlayback(state, false);
     }
+    // Ask each worklet to stop rendering and report its final cursor before disconnecting it. This
+    // gives the audio thread a coherent silent boundary instead of leaving a final PCM quantum live.
+    await Promise.all(
+      [...this.buffers.values()].map(async (state) => {
+        if (state.worklet) {
+          await this.quiesceWorklet(state);
+          await this.destroyWorklet(state);
+        }
+        this.detachPlayback(state, false, false);
+      }),
+    );
     const context = this.context;
     if (context && context.state === 'running') {
       try {
@@ -485,6 +507,21 @@ export class WebAudioPcmSink {
     if (!this.context) return this.getLifecycleSnapshot();
     const unlocked = await this.unlock();
     return this.getLifecycleSnapshot(unlocked);
+  }
+
+  /** Resume and prepare the stream processor synchronously from the native WebView's first trusted tap. */
+  async unlockForStart(): Promise<boolean> {
+    const context = this.ensureContext();
+    if (!context || !(await this.unlock())) return false;
+    if (context.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+      try {
+        await loadPcmStreamWorklet(context);
+      } catch (error) {
+        this.report(error);
+        return false;
+      }
+    }
+    return context.state === 'running';
   }
 
   releaseBuffer(id: PcmBufferId): boolean {
@@ -666,10 +703,59 @@ export class WebAudioPcmSink {
     worklet: AudioWorkletNode,
     message: { kind: string; frame?: number; live?: number },
   ): void {
-    if (state.worklet !== worklet || !this.context || message.kind !== 'position') return;
+    if (
+      state.worklet !== worklet ||
+      !this.context ||
+      (message.kind !== 'position' && message.kind !== 'quiesced' && message.kind !== 'destroyed')
+    )
+      return;
     if (message.live !== undefined) this.liveWorkletProcessors = message.live;
     state.streamFrame = message.frame ?? state.streamFrame;
     state.workletPositionAt = this.context.currentTime;
+    state.workletPositionUpdatedAtMs = performance.now();
+    if (message.kind === 'quiesced') {
+      state.positionBytes = this.currentPosition(state);
+      this.workletQuiesceResolvers.get(worklet)?.();
+    }
+    if (message.kind === 'destroyed') this.workletDestroyResolvers.get(worklet)?.();
+  }
+
+  private quiesceWorklet(state: PcmBufferState): Promise<void> {
+    const worklet = state.worklet;
+    if (!worklet) return Promise.resolve();
+    return new Promise((resolve) => {
+      let completed = false;
+      let timeout: ReturnType<typeof globalThis.setTimeout> | null = null;
+      const finish = (): void => {
+        if (completed) return;
+        completed = true;
+        if (timeout !== null) globalThis.clearTimeout(timeout);
+        if (this.workletQuiesceResolvers.get(worklet) === finish) this.workletQuiesceResolvers.delete(worklet);
+        resolve();
+      };
+      this.workletQuiesceResolvers.set(worklet, finish);
+      timeout = globalThis.setTimeout(finish, 100);
+      worklet.port.postMessage({ kind: 'quiesce' });
+    });
+  }
+
+  private destroyWorklet(state: PcmBufferState): Promise<void> {
+    const worklet = state.worklet;
+    if (!worklet) return Promise.resolve();
+    return new Promise((resolve) => {
+      let completed = false;
+      let timeout: ReturnType<typeof globalThis.setTimeout> | null = null;
+      const finish = (): void => {
+        if (completed) return;
+        completed = true;
+        if (timeout !== null) globalThis.clearTimeout(timeout);
+        if (this.workletDestroyResolvers.get(worklet) === finish) this.workletDestroyResolvers.delete(worklet);
+        resolve();
+      };
+      this.workletDestroyResolvers.set(worklet, finish);
+      timeout = globalThis.setTimeout(finish, 100);
+      worklet.port.postMessage({ kind: 'destroy' });
+    });
   }
 
   private postWorkletMessage(state: PcmBufferState, message: Record<string, unknown> & { kind: string }): void {
@@ -870,7 +956,7 @@ export class WebAudioPcmSink {
     return frame * state.format.nBlockAlign;
   }
 
-  private detachPlayback(state: PcmBufferState, updatePosition = true): void {
+  private detachPlayback(state: PcmBufferState, updatePosition = true, destroyWorkletNode = true): void {
     const source = state.source;
     const stream = state.stream;
     const worklet = state.worklet;
@@ -898,7 +984,7 @@ export class WebAudioPcmSink {
     }
     if (worklet) {
       worklet.port.onmessage = null;
-      worklet.port.postMessage({ kind: 'destroy' });
+      if (destroyWorkletNode) worklet.port.postMessage({ kind: 'destroy' });
       worklet.disconnect();
     }
     gain?.disconnect();

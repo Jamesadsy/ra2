@@ -1,5 +1,5 @@
 import type { VmShell } from './vmShell';
-import type { VmAudioLifecycleSnapshot, VmLifecycleSnapshot } from './vmLifecycle';
+import type { VmAudioLifecycleSnapshot, VmLifecycleFramePipeline, VmLifecycleSnapshot } from './vmLifecycle';
 import { reportNativeRuntimeMetrics } from '../platform/browser/nativeDiagnostics';
 
 interface NativeLifecycleDetail {
@@ -16,6 +16,7 @@ export function installRuntimeLifecycleCoordinator(
   vm: VmShell,
   releaseInput: () => void,
   showRecovery: (reason: string) => void,
+  getPresentedFrameCount: () => number = () => 0,
 ): () => void {
   let appPhase: 'foreground' | 'background' = 'foreground';
   let firstInteractionPending = false;
@@ -24,6 +25,8 @@ export function installRuntimeLifecycleCoordinator(
   let disposed = false;
   let backgroundSnapshot: VmLifecycleSnapshot | null = null;
   let backgroundAudio: VmAudioLifecycleSnapshot | null = null;
+  let backgroundFramePipeline: VmLifecycleFramePipeline | null = null;
+  let backgroundPresentedFrames = 0;
   let transitionQueue = Promise.resolve();
 
   const report = (
@@ -32,6 +35,7 @@ export function installRuntimeLifecycleCoordinator(
     worker: VmLifecycleSnapshot | null,
     audio: VmAudioLifecycleSnapshot | null,
     extras: Record<string, number | string | undefined> = {},
+    framePipeline: VmLifecycleFramePipeline | undefined = undefined,
   ) => {
     const baseline = backgroundSnapshot;
     const audioBaseline = backgroundAudio;
@@ -55,7 +59,9 @@ export function installRuntimeLifecycleCoordinator(
           : undefined,
       guestClockPaused: worker ? Number(worker.guestClockPaused) : undefined,
       workerRunning: worker ? Number(worker.workerRunning) : undefined,
+      lifecyclePaused: worker ? Number(worker.lifecyclePaused) : undefined,
       hypercallPending: worker ? Number(worker.hypercallPending) : undefined,
+      guestRequestPending: worker ? Number(worker.guestRequestPending) : undefined,
       pendingFileReads: worker?.pendingFileReads,
       pendingFileWrites: worker?.pendingFileWrites,
       rangePrefetchPending: worker ? Number(worker.rangePrefetchPending) : undefined,
@@ -64,9 +70,29 @@ export function installRuntimeLifecycleCoordinator(
       flushOk: worker?.flushOk === null || worker?.flushOk === undefined ? undefined : Number(worker.flushOk),
       safeToResume: worker ? Number(worker.safeToResume) : undefined,
       recoveryReason: worker?.recoveryReason ?? undefined,
+      workerFrameInFlightId: framePipeline?.workerInFlightId,
+      workerFramePendingEmission: framePipeline ? Number(framePipeline.workerPendingEmission) : undefined,
+      workerFrameScheduleGeneration: framePipeline?.workerScheduleGeneration,
+      workerFrameEmittedCount: framePipeline?.workerEmittedCount,
+      workerFrameAcknowledgedCount: framePipeline?.workerAcknowledgedCount,
+      mainFramePendingAckId: framePipeline?.mainPendingAckId,
+      mainFrameAckRafPending: framePipeline ? Number(framePipeline.mainAckRafPending) : undefined,
+      mainFrameReceivedCount: framePipeline?.mainReceivedCount,
+      mainFrameAcknowledgedCount: framePipeline?.mainAcknowledgedCount,
+      mainFrameReceivedDelta:
+        framePipeline && backgroundFramePipeline
+          ? framePipeline.mainReceivedCount - backgroundFramePipeline.mainReceivedCount
+          : undefined,
+      mainFrameAcknowledgedDelta:
+        framePipeline && backgroundFramePipeline
+          ? framePipeline.mainAcknowledgedCount - backgroundFramePipeline.mainAcknowledgedCount
+          : undefined,
+      presentedFrameCount: getPresentedFrameCount(),
+      presentedFrameDelta: getPresentedFrameCount() - backgroundPresentedFrames,
       audioContextState: audio?.contextState,
       audioContextTimeSeconds: audio?.contextTimeSeconds ?? undefined,
       audioContextSampleRateHz: audio?.contextSampleRateHz ?? undefined,
+      audioLastWorkletCursorUpdateAgeMs: audio?.lastWorkletCursorUpdateAgeMs ?? undefined,
       audioContextDeltaSeconds:
         audio?.contextTimeSeconds !== null && audio && audioBaseline?.contextTimeSeconds !== null && audioBaseline
           ? audio.contextTimeSeconds - audioBaseline.contextTimeSeconds
@@ -144,14 +170,25 @@ export function installRuntimeLifecycleCoordinator(
       try {
         const before = await vm.lifecycle('probe');
         backgroundSnapshot = before.worker;
-        report('before-background', timestamp, before.worker, before.audio);
+        backgroundFramePipeline = before.framePipeline ?? null;
+        backgroundPresentedFrames = getPresentedFrameCount();
+        report('before-background', timestamp, before.worker, before.audio, {}, before.framePipeline);
         const paused = await vm.lifecycle('pause');
         backgroundSnapshot = before.worker;
+        backgroundFramePipeline = paused.framePipeline ?? backgroundFramePipeline;
         backgroundAudio = paused.audio;
+        backgroundPresentedFrames = getPresentedFrameCount();
         backgroundPauseFailed = paused.worker.flushOk === false || !paused.worker.guestClockPaused;
-        report('background-paused', timestamp, paused.worker, paused.audio, {
-          workerResponsiveBeforeBackground: 1,
-        });
+        report(
+          'background-paused',
+          timestamp,
+          paused.worker,
+          paused.audio,
+          {
+            workerResponsiveBeforeBackground: 1,
+          },
+          paused.framePipeline,
+        );
       } catch {
         backgroundPauseFailed = true;
         reportNativeRuntimeMetrics({
@@ -170,13 +207,20 @@ export function installRuntimeLifecycleCoordinator(
     firstInteractionPending = true;
     try {
       const beforeResume = await vm.lifecycle('probe');
-      report('before-foreground-resume', timestamp, beforeResume.worker, beforeResume.audio);
+      report(
+        'before-foreground-resume',
+        timestamp,
+        beforeResume.worker,
+        beforeResume.audio,
+        {},
+        beforeResume.framePipeline,
+      );
       if (backgroundPauseFailed) {
         failClosed('background-pause-or-flush-failed', timestamp);
         return;
       }
       const resumed = await vm.lifecycle('resume');
-      report('after-foreground-resume', timestamp, resumed.worker, resumed.audio);
+      report('after-foreground-resume', timestamp, resumed.worker, resumed.audio, {}, resumed.framePipeline);
       if (!resumed.worker.safeToResume) {
         failClosed(resumed.worker.recoveryReason ?? 'runtime-not-safe-to-resume', timestamp);
       }
@@ -213,7 +257,7 @@ export function installRuntimeLifecycleCoordinator(
     });
     void vm.lifecycle('audio-unlock').then(
       (result) => {
-        report('audio-unlocked-by-user', timestamp, result.worker, result.audio);
+        report('audio-unlocked-by-user', timestamp, result.worker, result.audio, {}, result.framePipeline);
         if (result.audio.unlockResult === false) failClosed('audio-resume-failed-after-user-interaction', timestamp);
       },
       () => {
@@ -240,9 +284,14 @@ export function installRuntimeLifecycleCoordinator(
     const timestamp = Date.now();
     void vm.lifecycle('probe').then(
       (result) =>
-        report('foreground-runtime-probe', timestamp, result.worker, result.audio, {
-          workerResponseMs: performance.now() - startedAt,
-        }),
+        report(
+          'foreground-runtime-probe',
+          timestamp,
+          result.worker,
+          result.audio,
+          { workerResponseMs: performance.now() - startedAt },
+          result.framePipeline,
+        ),
       () =>
         reportNativeRuntimeMetrics({
           event: 'lifecycle',

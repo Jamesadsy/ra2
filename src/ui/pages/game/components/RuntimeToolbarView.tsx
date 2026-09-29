@@ -4,7 +4,7 @@ import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode 
 import { createPortal } from 'react-dom';
 import { CHEAT_GUIDES, type CheatGuideGameId } from '../cheatGuides';
 import { normalizeCheatText, CHEAT_TEXT_MAX_LENGTH } from '../input';
-import { setControlsCollapsed, toggleImmersiveFullscreen } from '../gameInput';
+import { isHostImmersiveMode, setControlsCollapsed, toggleImmersiveFullscreen } from '../gameInput';
 import { openGroupJoinDialog } from '../joinGroupDialog';
 import type { RuntimeToolbarCallbacks } from '../runtimeToolbar';
 import { Modal } from './Modal';
@@ -15,6 +15,7 @@ import { controlsCollapsed } from '../state/uiState';
 import { DEFAULT_VOLUME_PERCENT } from '../../../../adapter/audio';
 import { useStore } from '../../../shared/state/useStore';
 import { isDesktopEdge, showEdgeMouseNotice } from './edgeMouseNotice';
+import { isEa108IosHost } from '../../../../platform/browser/ea108MobileHost';
 
 // Remove experiments at the import boundary so production excludes ONNX/experimental Workers, rather than merely hiding buttons.
 const loadModelProbeDialog = import.meta.env.DEV
@@ -183,7 +184,8 @@ export function RuntimeToolbarView({
   setResolution(value: string): void;
 }) {
   const collapsed = useStore(controlsCollapsed);
-  const [fullscreen, setFullscreen] = useState(!!document.fullscreenElement);
+  const nativeIosHost = isEa108IosHost();
+  const [fullscreen, setFullscreen] = useState(nativeIosHost ? isHostImmersiveMode() : !!document.fullscreenElement);
   const [changingResolution, setChangingResolution] = useState(false);
   const [cheats, setCheats] = useState(false);
   const [probe, setProbe] = useState(false);
@@ -201,13 +203,15 @@ export function RuntimeToolbarView({
   const [message, setMessage] = useState('');
   const file = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    const sync = () => setFullscreen(!!document.fullscreenElement);
+    const sync = () => setFullscreen(nativeIosHost ? isHostImmersiveMode() : !!document.fullscreenElement);
     document.addEventListener('fullscreenchange', sync);
+    window.addEventListener('ra2-host-immersivechange', sync);
     callbacks.onVolume((volume / 100) ** 2);
     return () => {
       document.removeEventListener('fullscreenchange', sync);
+      window.removeEventListener('ra2-host-immersivechange', sync);
     };
-  }, [callbacks]);
+  }, [callbacks, nativeIosHost]);
   useEffect(() => {
     if (ModelProbeDialog) {
       void preloadModelProbeDialog().catch(() => undefined);
@@ -479,9 +483,26 @@ export function RuntimeToolbarView({
         id="vm-fullscreen"
         className="toolbar-button"
         type="button"
-        onClick={() => void toggleImmersiveFullscreen(canvas).catch((error) => setMessage(errorText(error)))}
+        aria-label={
+          nativeIosHost
+            ? fullscreen
+              ? 'Exit Immersive Play'
+              : 'Immersive Play'
+            : fullscreen
+              ? t('退出全屏')
+              : t('全屏')
+        }
+        onClick={() =>
+          void toggleImmersiveFullscreen(canvas, nativeIosHost).catch((error) => setMessage(errorText(error)))
+        }
       >
-        {fullscreen ? t('退出全屏') : t('全屏')}
+        {nativeIosHost
+          ? fullscreen
+            ? 'Exit Immersive Play'
+            : 'Immersive Play'
+          : fullscreen
+            ? t('退出全屏')
+            : t('全屏')}
       </button>
       {createPortal(
         <Modal

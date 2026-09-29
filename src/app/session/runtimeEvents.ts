@@ -1,4 +1,5 @@
 import type { VmFrame, Win32Call, VmNetworkStatus } from '../../vm86/win32';
+import type { VmMoviePlaybackState } from '../../contracts/moviePlayback';
 
 export type VmPhase = 'loading' | 'ready' | 'running' | 'blocked' | 'exited' | 'stopped' | 'error';
 
@@ -32,4 +33,8 @@ export interface GameVmCallbacks {
   onLogicFrame?: (count: number) => void;
   /** RA2/YR shell-title changes, such as GUI:MainMenu/CampaignMenu, for UI diagnostics and browser regressions. */
   onShellPage?: (title: string) => void;
+  /** Bink plus RA2 campaign-shell state; used to gate movie-only touch gestures. */
+  onMoviePlaybackState?: (state: VmMoviePlaybackState) => void;
+  /** Safe two-number summary of the effective [Video] RA2.INI resolution. */
+  onGuestResolution?: (resolution: string | null) => void;
 }

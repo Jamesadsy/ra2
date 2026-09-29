@@ -151,6 +151,90 @@ function writeU32(emulator: FakeEmulator, address: number, value: number): void 
 }
 
 describe('VmCore lifecycle orchestration', () => {
+  it('keeps the v86 instance running through a lifecycle pause and does not round-trip stop/run', async () => {
+    const emulator = new FakeEmulator();
+    const shim = Object.assign(fakeShim(), {
+      paused: false,
+      guestTimeMs: 1250,
+      pauseGuestClockForLifecycle() {
+        this.paused = true;
+      },
+      resumeGuestClockForLifecycle() {
+        this.paused = false;
+      },
+      inspectGuestClockForLifecycle() {
+        return { paused: this.paused, guestTimeMs: this.guestTimeMs };
+      },
+    });
+    const core = new VmCore(
+      {},
+      source(),
+      platform(emulator, new FakeAudio(), () => shim),
+    );
+    try {
+      await core.start();
+      const before = core.getLifecycleSnapshot();
+      const paused = await core.pauseForLifecycle();
+      expect(emulator.is_running()).toBe(true);
+      expect(emulator.stop).not.toHaveBeenCalled();
+      expect(paused).toMatchObject({ workerRunning: true, lifecyclePaused: true, guestClockPaused: true });
+      const resumed = await core.resumeForLifecycle();
+      expect(emulator.run).toHaveBeenCalledTimes(1);
+      expect(emulator.stop).not.toHaveBeenCalled();
+      expect(resumed).toMatchObject({ workerRunning: true, lifecyclePaused: false, guestClockPaused: false });
+      expect(resumed.guestTimeMs).toBe(before.guestTimeMs);
+    } finally {
+      await core.destroy();
+    }
+  });
+
+  it('drains a guest hypercall that was pending at the background edge before reporting resumed health', async () => {
+    const emulator = new FakeEmulator();
+    const dispatch = vi.fn(() => ({ eax: 0 }));
+    const shim = Object.assign(fakeShim(dispatch), {
+      paused: false,
+      pauseGuestClockForLifecycle() {
+        this.paused = true;
+      },
+      resumeGuestClockForLifecycle() {
+        this.paused = false;
+      },
+      inspectGuestClockForLifecycle() {
+        return { paused: this.paused, guestTimeMs: 1250 };
+      },
+      prepareGuestThreadReturn: () => 0,
+      resolveDynamicImport: () => ({
+        id: 999,
+        key: 'KERNEL32.DLL!Sleep',
+        dll: 'KERNEL32.DLL',
+        name: 'Sleep',
+        argBytes: 4,
+        slot: 0,
+        stub: 0,
+      }),
+    });
+    const core = new VmCore(
+      {},
+      source(),
+      platform(emulator, new FakeAudio(), () => shim),
+    );
+    try {
+      await core.start();
+      await core.pauseForLifecycle();
+      writeU32(emulator, HYPERCALL_STACK, 0x2000);
+      writeU32(emulator, 0x2004, 0);
+      writeU32(emulator, HYPERCALL_REQUEST, 999);
+
+      const resumed = await core.resumeForLifecycle();
+
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(emulator.read_memory(HYPERCALL_REQUEST, 4)).toEqual(new Uint8Array(4));
+      expect(resumed).toMatchObject({ safeToResume: true, guestClockPaused: false, lifecyclePaused: false });
+    } finally {
+      await core.destroy();
+    }
+  });
+
   it('客体处理较慢时按墙钟让出，不必等满 128 次调用才响应输入', async () => {
     const core = new VmCore(
       {},

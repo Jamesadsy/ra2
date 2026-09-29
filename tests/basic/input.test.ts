@@ -46,4 +46,9 @@ describe('锁定鼠标分辨率适配', () => {
     expect(rescaleLogicalPointer(640, 360, 1280, 720, 800, 600)).toEqual([400, 300]);
     expect(rescaleLogicalPointer(1279, 719, 1280, 720, 1600, 900)).toEqual([1599, 899]);
   });
+
+  it('标准 800×600 guest 在 iPhone host fit 下仍映射到原始 4:3 坐标', () => {
+    expect(rescaleLogicalPointer(400, 300, 800, 600, 800, 600)).toEqual([400, 300]);
+    expect(rescaleLogicalPointer(799, 599, 800, 600, 800, 600)).toEqual([799, 599]);
+  });
 });

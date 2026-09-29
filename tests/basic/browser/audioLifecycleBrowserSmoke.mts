@@ -45,7 +45,12 @@ try {
         const context = new AudioContext();
         const sink = new WebAudioPcmSink({ contextFactory: () => context, onError: e => errors.push(String(e)) });
         try {
-          if(!await sink.unlock()) throw new Error('AudioContext did not enter running state');
+          if(!await sink.unlockForStart()) throw new Error('Tap-to-Start audio unlock or worklet preparation failed');
+          const startSnapshot = sink.getLifecycleSnapshot(true);
+          if(startSnapshot.contextState !== 'running' ||
+             (startSnapshot.audioWorkletSupported && !startSnapshot.audioWorkletModuleLoaded)) {
+            throw new Error('Tap-to-Start returned before the AudioContext/worklet was ready');
+          }
           for(let cycle = 0; cycle < 16; cycle++) {
             const before = created;
             sink.createBuffer('music', 88200);
@@ -63,6 +68,15 @@ try {
               const suspended = await sink.suspendForLifecycle();
               if(context.state !== 'suspended' || suspended.playingBuffers !== 1 || suspended.workletCount !== 0) {
                 throw new Error('Lifecycle suspend did not checkpoint playback and release the old worklet');
+              }
+              if(suspended.sourceCount !== 0 || suspended.streamCount !== 0 || suspended.liveProcessorCount !== 0) {
+                throw new Error('Lifecycle suspend left an active source, stream, or worklet processor');
+              }
+              if(!Number.isFinite(suspended.buffers[0]?.positionFrames) ||
+                 suspended.lastWorkletCursorUpdateAgeMs === null ||
+                 suspended.lastWorkletCursorUpdateAgeMs === undefined ||
+                 suspended.lastWorkletCursorUpdateAgeMs > 250) {
+                throw new Error('Lifecycle suspend did not capture a fresh, coherent worklet cursor');
               }
               const beforeResume = created;
               const resumed = await sink.resumeForLifecycle();

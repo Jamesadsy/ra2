@@ -42,6 +42,11 @@ import {
 import { type PcmPlayOptions, type PcmWaveFormat } from './audio';
 import type { DplayTransportFactory } from './shim/dplayTransport';
 import type { GameShimProfile } from './shim/gameProfile';
+import {
+  updateMoviePlaybackState,
+  type VmMoviePlaybackState,
+  type VmMoviePlaybackTracker,
+} from '../contracts/moviePlayback';
 
 const GUEST_BINK_VIDEO_EXPORTS = new Set([
   '_BinkSetSoundSystem@8',
@@ -468,6 +473,22 @@ const CommonWin32Shim = withOle32(
 );
 
 export class Win32ShimBase extends CommonWin32Shim {
+  private moviePlaybackTracker: VmMoviePlaybackTracker = {
+    lastNonEmptyShellPageTitle: '',
+    previousNativeBinkActive: false,
+  };
+
+  inspectMoviePlaybackState(): VmMoviePlaybackState {
+    const update = updateMoviePlaybackState(
+      this.moviePlaybackTracker,
+      this.nativeBinkPlaybackActive,
+      this.binkVideos.size > 0,
+      this.inspectShellPageTitle(),
+    );
+    this.moviePlaybackTracker = update.tracker;
+    return update.state;
+  }
+
   dispatch(call: Win32Call): Win32Result | null {
     // Release the cross-call lock only after the _BinkClose redirected stub starts. If the DLL
     // imports Win32 internally, this dispatch still holds atomicGuestCall's inner lock;
