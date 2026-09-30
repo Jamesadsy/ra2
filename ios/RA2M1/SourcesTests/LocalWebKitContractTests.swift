@@ -69,7 +69,8 @@ final class LocalWebKitContractTests: XCTestCase {
         let wrote = try await waitForString("window.__ra2M1StorageWrite", in: webView)
         XCTAssertEqual(wrote, "written")
 
-        let lifecycle = RuntimeLifecycleCoordinator(webView: webView)
+        let diagnostics = RuntimeDiagnosticsLog(userURL: FileManager.default.temporaryDirectory)
+        let lifecycle = RuntimeLifecycleCoordinator(webView: webView, diagnostics: diagnostics)
         lifecycle.applicationDidEnterBackground()
         lifecycle.applicationWillEnterForeground()
         let readStarted = try await webView.evaluateJavaScript("""
