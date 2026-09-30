@@ -162,8 +162,7 @@ const SOUND_WRITE_POSITION_CACHE = 16;
 // 2,300 Worker-to-main-thread queries per second; 1023 hits reduce that to about 140 per second while refreshing
 // within a frame, avoiding WebAudio-message flooding and intermittent audio dropouts.
 const SOUND_POSITION_FAST_BUDGET = 1023;
-const SOUND_POSITION_STREAM_BYPASS =
-  import.meta.env?.DEV && import.meta.env.VITE_RA2_SOUND_POSITION_CACHE_BYPASS === '1';
+const SOUND_POSITION_STREAM_BYPASS = import.meta.env?.VITE_RA2_SOUND_POSITION_CACHE_BYPASS === '1';
 const SOUND_CURSOR_CONTRACT_AB = !(import.meta.env?.DEV && import.meta.env.VITE_RA2_SOUND_CURSOR_BASELINE === '1');
 /** WebAudio renders 128 output frames per quantum; reserve quanta for render, Worker delivery and worklet delivery. */
 const SOUND_RENDER_QUANTUM_FRAMES = 128;
@@ -840,7 +839,8 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
               const streamTrace = this.streamTraces.get(buffer.object);
               if (streamTrace) {
                 const now = this.audioNow();
-                if (streamTrace.refreshedAt > 0) {
+                const cacheBypassActive = SOUND_POSITION_STREAM_BYPASS && streamTrace.fromWriteCursorObserved;
+                if (streamTrace.refreshedAt > 0 && !cacheBypassActive) {
                   streamTrace.trace.maxCacheAgeMs = Math.max(
                     streamTrace.trace.maxCacheAgeMs,
                     now - streamTrace.refreshedAt,

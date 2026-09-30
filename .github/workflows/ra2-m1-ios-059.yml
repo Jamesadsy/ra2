@@ -11,6 +11,7 @@ on:
       - secondsun/ra2-m1-ios-068-soviet-maps02
       - secondsun/ra2-m1-ios-069-tap-start-handoff
       - secondsun/ra2-m1-ios-070-save-audio-recovery
+      - secondsun/ra2-m1-ios-073-streamed-cursor-cache-bypass
   workflow_dispatch:
 
 permissions:
@@ -25,6 +26,8 @@ jobs:
     name: iPhoneOS ARM64 compile, custody and lifecycle proof
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      VITE_RA2_SOUND_POSITION_CACHE_BYPASS: '1'
     steps:
       - name: Checkout source only
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

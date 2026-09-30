@@ -331,6 +331,92 @@ describe('DirectSound 流式音乐（RA2 增补，原 audioSmoke）', () => {
     expect(readU32(memory, pointerOut)).toBeGreaterThan(0);
     expect(readU32(memory, bytesOut)).toBe(512);
   });
+  it('keeps the fast cache for non-streamed buffers and bypasses it after FROMWRITECURSOR', async () => {
+    vi.stubEnv('VITE_RA2_SOUND_POSITION_CACHE_BYPASS', '1');
+    vi.resetModules();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    try {
+      const {
+        callShim: call,
+        createGuestMemory: createMemory,
+        createTestShim: createShim,
+        readU32: read,
+        writeU32: write,
+      } = await import('../helpers/guestMemory');
+      const memory = createMemory(12 * 1024 * 1024);
+      let workerCursor = 4_000;
+      let consumerReads = 0;
+      const audio: Win32AudioSink = {
+        ...createWorkerLikeAudio(),
+        getConsumerCursor() {
+          consumerReads++;
+          return {
+            positionBytes: workerCursor,
+            outputSampleRateHz: 22_050,
+            transportLatencyMs: 0,
+            ageMs: 0,
+          };
+        },
+      };
+      const shim = createShim(memory, { firstDynamicId: 1, audio });
+      const dispatchSound = (key: string, args: number[]) => call(shim, key, args, 0x2000);
+      memory.write_memory(waveFormat.subarray(2), 0x1100);
+      write(memory, 0x1000, 20);
+      write(memory, 0x1008, 88_200);
+      write(memory, 0x1010, 0x1100);
+      expect(dispatchSound('DSOUND.COM!IDirectSound.CreateSoundBuffer', [0, 0x1000, 0x1200, 0]).eax).toBe(0);
+      const object = read(memory, 0x1200);
+      const playOut = 0x1210;
+      const writeOut = 0x1214;
+      expect(dispatchSound('DSOUND.COM!IDirectSoundBuffer.Play', [object, 0, 0, 1]).eax).toBe(0);
+
+      expect(dispatchSound('DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [object, playOut, writeOut]).eax).toBe(
+        0,
+      );
+      expect(read(memory, object + 12)).toBe(1023);
+      expect(read(memory, playOut)).toBe(workerCursor);
+      expect(read(memory, writeOut) - read(memory, playOut)).toBe(2_048);
+
+      // Model one guest fast-stub hit before the next host refresh.
+      write(memory, object + 12, 1022);
+      workerCursor = 8_000;
+      expect(dispatchSound('DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [object, playOut, writeOut]).eax).toBe(
+        0,
+      );
+      let trace = shim.getSoundStreamingTraces().find((item) => item.id === object)!;
+      expect(read(memory, object + 12)).toBe(1023);
+      expect(trace.cacheHits).toBe(1);
+
+      const pointerOut = 0x1220;
+      const bytesOut = 0x1224;
+      expect(
+        dispatchSound('DSOUND.COM!IDirectSoundBuffer.Lock', [object, 0, 512, pointerOut, bytesOut, 0, 0, 1]).eax,
+      ).toBe(0);
+      expect(read(memory, object + 12)).toBe(0);
+      trace = shim.getSoundStreamingTraces().find((item) => item.id === object)!;
+      expect(trace.lockFlags).toBe(1);
+      const cacheHitsBeforeBypass = trace.cacheHits;
+      const refreshesBeforeBypass = trace.hostRefreshes;
+      const readsBeforeBypass = consumerReads;
+
+      for (const cursor of [12_000, 16_000, 20_000]) {
+        workerCursor = cursor;
+        expect(dispatchSound('DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [object, playOut, writeOut]).eax).toBe(
+          0,
+        );
+        expect(read(memory, playOut)).toBe(cursor);
+        expect(read(memory, object + 12)).toBe(0);
+        trace = shim.getSoundStreamingTraces().find((item) => item.id === object)!;
+        expect(trace.cacheHits).toBe(cacheHitsBeforeBypass);
+      }
+      expect(consumerReads - readsBeforeBypass).toBe(3);
+      expect(trace.hostRefreshes - refreshesBeforeBypass).toBe(3);
+    } finally {
+      now.mockRestore();
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
   // Streaming music regression: after Unlock overwrites a playing DirectSound ring buffer,
   // switch to a single live reader; do not keep looping the first snapshot or recreate the source for every write.
   it('环形 buffer 首次动态覆写后切到实时 PCM 流且保持连续游标', () => {
