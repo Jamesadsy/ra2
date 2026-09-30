@@ -7,7 +7,8 @@ import XCTest
 final class RuntimeLifecycleTests: XCTestCase {
     func testBackgroundForegroundRetainsTheSameLiveWebView() {
         let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
-        let lifecycle = RuntimeLifecycleCoordinator(webView: webView)
+        let diagnostics = RuntimeDiagnosticsLog(userURL: FileManager.default.temporaryDirectory)
+        let lifecycle = RuntimeLifecycleCoordinator(webView: webView, diagnostics: diagnostics)
 
         lifecycle.applicationDidEnterBackground()
         XCTAssertEqual(lifecycle.phase, .background)
