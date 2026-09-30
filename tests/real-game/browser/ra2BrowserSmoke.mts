@@ -1140,11 +1140,40 @@ try {
   if (!IOS_HOST_MODE) {
     // Local resources now require explicit selection; a fresh browser context has no IndexedDB import cache.
     await page.getByRole('button', { name: '开发测试', exact: true }).click();
-    await chooseLocalGameIfPrompted(page, canvas, GAME_ID === 'ra2' ? 0 : 1);
+    await chooseLocalGameIfPrompted(page, canvas, GAME_ID === 'ra2' ? 0 : 1).catch(async (error: unknown) => {
+      const heading = await page
+        .locator('h3')
+        .allTextContents()
+        .catch(() => []);
+      const phase = await canvas.getAttribute('data-vm-phase').catch(() => null);
+      const batch = await canvas.getAttribute('data-vm-batch').catch(() => null);
+      const bink = await canvas.getAttribute('data-vm-bink-calls').catch(() => null);
+      const fps = await page
+        .locator('#vm-fps')
+        .textContent()
+        .catch(() => null);
+      throw new Error(
+        `Local game selection failed: phase=${phase} headings=${JSON.stringify(heading)} batch=${batch} bink=${bink} fps=${fps} pageErrors=${pageErrors.length} assetFailures=${GAME_ASSET_FAILURES.length}`,
+        { cause: error },
+      );
+    });
   }
 
   const problem = page.locator('h3').filter({ hasText: /运行错误|接口待实现/ });
-  await expectShellPage(page, 'mainmenu', 60_000);
+  await expectShellPage(page, 'mainmenu', 60_000).catch(async (error: unknown) => {
+    const status = await page
+      .locator('#screen')
+      .getAttribute('data-vm-phase')
+      .catch(() => null);
+    const problemText = await problem
+      .first()
+      .textContent()
+      .catch(() => null);
+    throw new Error(
+      `Main menu did not open: phase=${status} problem=${problemText} pageErrors=${pageErrors.length} assetFailures=${GAME_ASSET_FAILURES.length}`,
+      { cause: error },
+    );
+  });
   if (TAP_TO_START) {
     const startup = await page.evaluate(() => {
       const rows =
@@ -1544,6 +1573,31 @@ try {
   const setFrequencyCallsDelta =
     (battlefieldVideoAudioAfter['DSOUND.COM!IDirectSoundBuffer.SetFrequency'] ?? 0) -
     (battlefieldVideoAudioBefore['DSOUND.COM!IDirectSoundBuffer.SetFrequency'] ?? 0);
+  console.log(
+    `🔬 baseline cameo window: ${JSON.stringify({
+      binkBefore: battlefieldVideoBinkBefore,
+      binkAfter: battlefieldVideoBinkAfter,
+      baselineIds: [...baselineBufferIds],
+      newIds: [...battlefieldBufferIds],
+      advancingIds: advancingBattlefieldBuffers,
+      formats: battlefieldFormats,
+      newBufferWriteDelta,
+      newBufferFrequencyChanges,
+      maxActiveWriteAgeMs,
+      startBuffers: audioWindowStart?.buffers.map((buffer) => ({
+        id: buffer.id,
+        position: buffer.positionBytes,
+        playing: buffer.playing,
+        writes: buffer.writeCount,
+      })),
+      endBuffers: audioWindowEnd?.buffers.map((buffer) => ({
+        id: buffer.id,
+        position: buffer.positionBytes,
+        playing: buffer.playing,
+        writes: buffer.writeCount,
+      })),
+    })}`,
+  );
   // This corner presentation is a known non-blocking residual. It may remain open beyond this probe window;
   // M1 requires the original campaign briefing and usable audio, both checked independently above/below.
   assert(

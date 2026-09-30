@@ -9,10 +9,12 @@ final class RuntimeLifecycleCoordinator {
     }
 
     let webView: WKWebView
+    let diagnostics: RuntimeDiagnosticsLog
     private(set) var phase: Phase = .foreground
 
-    init(webView: WKWebView) {
+    init(webView: WKWebView, diagnostics: RuntimeDiagnosticsLog) {
         self.webView = webView
+        self.diagnostics = diagnostics
     }
 
     func applicationDidEnterBackground() {
@@ -27,9 +29,12 @@ final class RuntimeLifecycleCoordinator {
 
     private func dispatchLifecycle(_ nextPhase: String, at date: Date = Date()) {
         let timestampMs = date.timeIntervalSince1970 * 1_000
+        let dispatchMs = Date().timeIntervalSince1970 * 1_000
+        diagnostics.recordNativeMetrics("audio lifecycle dispatch phase=\(nextPhase) eventMs=\(timestampMs) dispatchMs=\(dispatchMs)")
         let script = "window.__RA2NativeLifecycle && window.__RA2NativeLifecycle('\(nextPhase)', \(timestampMs));"
-        webView.evaluateJavaScript(script) { _, _ in
-            // The page records lifecycle status through the existing bounded User/Debug bridge.
+        webView.evaluateJavaScript(script) { [diagnostics] _, error in
+            let completionMs = Date().timeIntervalSince1970 * 1_000
+            diagnostics.recordNativeMetrics("audio lifecycle completion phase=\(nextPhase) completionMs=\(completionMs) success=\(error == nil ? 1 : 0)")
         }
     }
 }

@@ -248,6 +248,44 @@ export interface Win32AudioSink {
   setFrequency(id: number, frequency: number): boolean;
   getState(id: number): { positionBytes: number; playing: boolean } | null;
   releaseBuffer(id: number): boolean;
+  /** Bounded metadata-only DirectSound streaming trace; never contains PCM or guest paths. */
+  recordStreamTrace?(trace: SoundStreamingTrace): void;
+  /** Bounded asynchronous consumer sample. Worker implementations may return null until a fresh sample arrives. */
+  getConsumerCursor?(id: number): SoundConsumerCursor | null;
+}
+
+export interface SoundConsumerCursor {
+  positionBytes: number;
+  outputSampleRateHz: number;
+  transportLatencyMs: number;
+  ageMs: number;
+}
+
+export interface SoundStreamingTrace {
+  id: number;
+  size: number;
+  format: PcmWaveFormat;
+  frequency: number;
+  playing: boolean;
+  looping: boolean;
+  workerPlayCursor: number;
+  returnedWriteCursor: number;
+  candidateSafeWriteCursor: number;
+  cacheHits: number;
+  hostRefreshes: number;
+  maxCacheAgeMs: number;
+  lockFlags: number;
+  requestedOffset: number;
+  requestedBytes: number;
+  resolvedOrigin: number;
+  firstOffset: number;
+  firstBytes: number;
+  secondOffset: number;
+  secondBytes: number;
+  unsafeOverlap: boolean;
+  unlockBytes: number;
+  repeatedRegionCount: number;
+  observedAtMs: number;
 }
 
 export interface VmGdiFont {

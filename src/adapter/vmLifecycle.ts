@@ -41,6 +41,9 @@ export interface VmAudioLifecycleSnapshot {
   contextState: string;
   contextIdentity: number | null;
   contextCreationCount: number;
+  freshContextRecoveryCount?: number;
+  retiredContextCount?: number;
+  retiredContextCloseFailures?: number;
   lifecycleRecoveryPending: boolean;
   suspendCallAttempted: boolean;
   suspendSucceeded: boolean | null;
@@ -49,6 +52,12 @@ export interface VmAudioLifecycleSnapshot {
   trustedGestureAttemptCount: number;
   trustedGestureResumeResult: boolean | null;
   trustedInteractionTrusted: boolean | null;
+  trustedEventType?: string | null;
+  trustedEventTimestampMs?: number | null;
+  trustedResumeCallTimestampMs?: number | null;
+  trustedResumeResultTimestampMs?: number | null;
+  graphRebuildResult?: boolean | null;
+  graphRebuildTimestampMs?: number | null;
   contextTimeSeconds: number | null;
   contextSampleRateHz: number | null;
   lastWorkletCursorUpdateAgeMs?: number | null;

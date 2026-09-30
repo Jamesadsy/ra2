@@ -369,7 +369,7 @@ final class RuntimeDiagnosticsLog {
                     "audioFrequencyHz", "audioChannels", "audioBitsPerSample", "audioBlockAlign", "audioFormatCount",
                     "audioSourceStartCount", "audioStreamStartCount", "audioWorkletStartCount", "audioDynamicStreamWrites", "audioDynamicStreamWriteRateHz",
                     "audioBufferCreateCount", "audioBufferDuplicateCount", "audioBufferCursorFrames", "audioBufferTotalFrames",
-                    "audioContextIdentity", "audioContextCreationCount", "audioLifecycleRecoveryPending", "audioSuspendCallAttempted",
+                    "audioContextIdentity", "audioContextCreationCount", "audioFreshContextRecoveryCount", "audioRetiredContextCount", "audioRetiredContextCloseFailures", "audioLifecycleRecoveryPending", "audioSuspendCallAttempted",
                     "audioSuspendSucceeded", "audioAutomaticResumeAttempted", "audioAutomaticResumeResult",
                     "audioTrustedGestureAttemptCount", "audioTrustedGestureResumeResult", "audioTrustedInteractionTrusted",
                     "audioLiveStreamedBuffers", "audioWorkletModuleLoaded",
@@ -381,12 +381,20 @@ final class RuntimeDiagnosticsLog {
                     "binkOpenCalls", "binkDoFrameCalls", "binkNextFrameCalls", "binkWaitCalls", "directSoundCreateBufferCalls",
                     "directSoundLockCalls", "directSoundUnlockCalls", "directSoundPlayCalls", "directSoundSetFrequencyCalls", "winmmTimeGetTimeCalls",
                     "guestWidth", "guestHeight", "canvasCssWidth", "canvasCssHeight",
-                    "canvasBackingWidth", "canvasBackingHeight", "fps", "firstGestureTimestampMs"]
+                    "canvasBackingWidth", "canvasBackingHeight", "fps", "firstGestureTimestampMs",
+                    "bufferId", "bufferBytes", "formatTag", "channels", "sampleRateHz", "bitsPerSample", "blockAlign", "frequencyHz",
+                    "workerPlayCursor", "returnedWriteCursor", "candidateSafeWriteCursor", "cacheHits", "hostRefreshes", "maxCacheAgeMs",
+                    "lockFlags", "requestedOffset", "requestedBytes", "resolvedOrigin", "firstOffset", "firstBytes", "secondOffset",
+                    "secondBytes", "unsafeOverlap", "unlockBytes", "repeatedRegionCount", "consumerCursor", "consumerCursorAgeMs",
+                    "consumerContextTime", "workerToMainAgeMs", "webEventReceivedAtMs", "webTransitionCompletedAtMs",
+                    "audioTrustedEventTimestampMs", "audioTrustedResumeCallTimestampMs", "audioTrustedResumeResultTimestampMs",
+                    "audioGraphRebuildResult", "audioGraphRebuildTimestampMs", "postRecoveryProbeMs",
+                    "postRecoveryContextDeltaSeconds", "postRecoveryCursorDeltaFrames"]
         var fields: [String] = []
         for key in keys {
             if let value = Self.boundedNumber(body[key], range: 0...10_000_000_000_000) { fields.append("\(key)=\(value)") }
         }
-        for key in ["event", "lifecyclePhase", "documentVisibility", "audioContextState", "rendererBackend", "workerPhase", "recoveryReason"] {
+        for key in ["event", "lifecyclePhase", "documentVisibility", "audioContextState", "audioTrustedEventType", "rendererBackend", "workerPhase", "recoveryReason"] {
             if let value = body[key] as? String,
                value.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil {
                 fields.append("\(key)=\(value)")

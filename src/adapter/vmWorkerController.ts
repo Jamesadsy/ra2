@@ -19,6 +19,7 @@ import type { MainToWorkerMessage, VmInitConfig, WorkerToMainMessage } from './v
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmPointerState } from './vmShell';
 import type { VmLifecycleSnapshot } from './vmLifecycle';
+import type { SoundConsumerCursor, SoundStreamingTrace } from '../vm86/win32';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 import type { VmFrame } from '../vm86/win32';
@@ -63,7 +64,31 @@ interface WorkerScope {
 }
 
 class ProxyAudioSink implements VmAudioSink {
+  private readonly consumerSamples = new Map<number, Extract<MainToWorkerMessage, { type: 'audio-cursor' }>>();
   constructor(private readonly post: VmWorkerControllerDependencies['postMessage']) {}
+
+  updateConsumerCursor(sample: Extract<MainToWorkerMessage, { type: 'audio-cursor' }>): void {
+    const previous = this.consumerSamples.get(sample.id);
+    this.consumerSamples.set(sample.id, {
+      ...sample,
+      transportLatencyMs: Math.min(50, Math.max(previous?.transportLatencyMs ?? 0, sample.transportLatencyMs)),
+    });
+  }
+
+  getConsumerCursor(id: number): SoundConsumerCursor | null {
+    const sample = this.consumerSamples.get(id);
+    if (!sample || !sample.byteLength || !sample.blockAlign) return null;
+    const ageMs = Math.max(0, Date.now() - sample.observedAtEpochMs);
+    if (ageMs > 250) return null;
+    const advanced = sample.playing ? Math.floor((ageMs * sample.frequency) / 1000) * sample.blockAlign : 0;
+    const aligned = Math.floor((sample.positionBytes + advanced) / sample.blockAlign) * sample.blockAlign;
+    return {
+      positionBytes: aligned % sample.byteLength,
+      outputSampleRateHz: sample.outputSampleRateHz,
+      transportLatencyMs: sample.transportLatencyMs,
+      ageMs,
+    };
+  }
 
   createBuffer(id: number, byteLength: number, format: PcmWaveFormat): void {
     this.post({ type: 'audio', op: { op: 'createBuffer', id, byteLength, format } });
@@ -119,7 +144,12 @@ class ProxyAudioSink implements VmAudioSink {
     return null;
   }
 
+  recordStreamTrace(trace: SoundStreamingTrace): void {
+    this.post({ type: 'audio', op: { op: 'streamTrace', trace } });
+  }
+
   releaseBuffer(id: number): boolean {
+    this.consumerSamples.delete(id);
     this.post({ type: 'audio', op: { op: 'releaseBuffer', id } });
     return true;
   }
@@ -169,6 +199,7 @@ function requestIdOf(message: MainToWorkerMessage): number | undefined {
 
 export class VmWorkerController {
   private core: VmWorkerCore | null = null;
+  private audioProxy: ProxyAudioSink | null = null;
   private sourceTemplate: GameFileProvider | null = null;
   private started = false;
   private initReady: Promise<void> = Promise.resolve();
@@ -214,6 +245,9 @@ export class VmWorkerController {
   async handleMessage(message: MainToWorkerMessage): Promise<void> {
     try {
       switch (message.type) {
+        case 'audio-cursor':
+          this.audioProxy?.updateConsumerCursor(message);
+          break;
         case 'init':
           this.initReady = this.handleInit(message.config);
           await this.initReady;
@@ -478,7 +512,7 @@ export class VmWorkerController {
       deferFrameSnapshot: true,
       packedRgb565Frames: true,
       takeFrameBuffer: (size) => this.frameBuffers.take(size),
-      audio: this.dependencies.audio ?? new ProxyAudioSink(this.post),
+      audio: this.dependencies.audio ?? (this.audioProxy = new ProxyAudioSink(this.post)),
       fastFileRead: config.fastFileRead,
     };
     this.core = this.dependencies.createCore(callbacks, source, platform);

@@ -12,6 +12,7 @@ declare global {
 }
 
 const browser = await chromium.launch({ args: ['--no-sandbox'] });
+const freshContextPolicy = process.env.RA2_BROWSER_FRESH_CONTEXT === '1';
 try {
   const page = await browser.newPage({ ignoreHTTPSErrors: true });
   await preventThirdPartyDownloads(page);
@@ -36,8 +37,12 @@ try {
       return originalResume.call(this);
     };
 
-    const context = new AudioContext();
-    const sink = new WebAudioPcmSink({ contextFactory: () => context, onError: error => attempts.push({ error: String(error) }) });
+    const contexts = [];
+    const sink = new WebAudioPcmSink({
+      contextFactory: () => { const context = new AudioContext(); contexts.push(context); return context; },
+      foregroundRecoveryPolicy: ${JSON.stringify(freshContextPolicy ? 'fresh-context-on-trusted-input' : 'same-context')},
+      onError: error => attempts.push({ error: String(error) })
+    });
     const originalNode = AudioWorkletNode;
     let nodesCreated = 0;
     AudioWorkletNode = class extends originalNode {
@@ -63,7 +68,8 @@ try {
     sink.installUserGestureUnlock(document);
     window.__ra2AudioTest = {
       sink,
-      context,
+      get context() { return contexts.at(-1); },
+      get contexts() { return contexts; },
       attempts,
       get nodesCreated() { return nodesCreated; },
       get guestFrames() { return guestFrames; },
@@ -109,7 +115,7 @@ try {
     assert.equal(automatic.automaticResumeAttempted, true);
     assert.equal(automatic.automaticResumeResult, false, 'the deterministic policy denies non-gesture resume');
     assert.equal(automatic.lifecycleRecoveryPending, true);
-    assert.equal(automatic.contextState, cycleIndex === 2 ? 'running' : 'suspended');
+    assert.equal(automatic.contextState, freshContextPolicy || cycleIndex === 2 ? 'running' : 'suspended');
     const framesWhileAway = await page.evaluate(() => window.__ra2AudioTest.guestFrames);
 
     if (cycleIndex === 0) {
@@ -158,8 +164,25 @@ try {
       cycles.length + 2,
       'include the initial start tap and each recovery tap',
     );
-    assert.equal(after.contextCreationCount, 1, 'recovery must reuse the running sink context');
-    assert.equal(after.contextIdentity, before.contextIdentity);
+    assert.equal(after.contextCreationCount, freshContextPolicy ? cycleIndex + 2 : 1);
+    if (freshContextPolicy) {
+      assert.notEqual(after.contextIdentity, before.contextIdentity);
+      assert.equal(after.freshContextRecoveryCount, cycleIndex + 1);
+      assert.equal(after.retiredContextCount, cycleIndex + 1);
+      assert.equal(after.retiredContextCloseFailures, 0);
+      if (cycleIndex === 2) {
+        await page.evaluate(() => {
+          delete window.__ra2AudioTest.contexts.at(-2).state;
+        });
+      }
+      await page.waitForFunction(
+        () => window.__ra2AudioTest.contexts.slice(0, -1).every((context: AudioContext) => context.state === 'closed'),
+        undefined,
+        { timeout: 3_000 },
+      );
+    } else {
+      assert.equal(after.contextIdentity, before.contextIdentity);
+    }
     assert.equal(after.playingBuffers, 1);
     assert.equal(after.workletCount + after.streamCount, 1);
     assert.equal(after.sourceCount, 0, 'the one-shot source must not remain next to the rebuilt live stream');
@@ -181,10 +204,10 @@ try {
       'resume must be called in a trusted event stack',
     );
     if (cycleIndex === 2) {
-      assert.equal(state.reportedRunningOverride, true);
+      assert.equal(state.reportedRunningOverride, !freshContextPolicy);
       assert.ok(
-        state.attempts.some((attempt) => attempt.trusted === true && attempt.state === 'running'),
-        'trusted recovery must force resume even when WebKit reports running',
+        state.attempts.some((attempt) => attempt.trusted === true),
+        'trusted recovery must force resume even when WebKit initially reports running',
       );
     }
     assert.equal(state.nodesCreated, cycles.length + 2, 'each recovery builds exactly one new worklet');
@@ -203,10 +226,15 @@ try {
     await window.__ra2AudioTest.destroy();
     return result;
   });
-  assert.equal(final.snapshot.contextCreationCount, 1);
+  assert.equal(final.snapshot.contextCreationCount, freshContextPolicy ? 4 : 1);
   assert.equal(final.snapshot.trustedGestureAttemptCount, 4, 'one start tap plus three recovery taps');
   assert.equal(final.snapshot.contextState, 'running');
-  console.log({ cycles, resumeAttempts: final.attempts.length, contextCreations: final.snapshot.contextCreationCount });
+  console.log({
+    policy: freshContextPolicy ? 'fresh' : 'same',
+    cycles,
+    resumeAttempts: final.attempts.length,
+    contextCreations: final.snapshot.contextCreationCount,
+  });
 } finally {
   await browser.close();
 }

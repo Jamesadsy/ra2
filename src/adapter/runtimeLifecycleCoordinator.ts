@@ -28,6 +28,7 @@ export function installRuntimeLifecycleCoordinator(
   let backgroundFramePipeline: VmLifecycleFramePipeline | null = null;
   let backgroundPresentedFrames = 0;
   let transitionQueue = Promise.resolve();
+  const postRecoveryTimers = new Set<number>();
 
   const report = (
     lifecyclePhase: string,
@@ -92,6 +93,9 @@ export function installRuntimeLifecycleCoordinator(
       audioContextState: audio?.contextState,
       audioContextIdentity: audio?.contextIdentity ?? undefined,
       audioContextCreationCount: audio?.contextCreationCount,
+      audioFreshContextRecoveryCount: audio?.freshContextRecoveryCount,
+      audioRetiredContextCount: audio?.retiredContextCount,
+      audioRetiredContextCloseFailures: audio?.retiredContextCloseFailures,
       audioLifecycleRecoveryPending: audio ? Number(audio.lifecycleRecoveryPending) : undefined,
       audioSuspendCallAttempted: audio ? Number(audio.suspendCallAttempted) : undefined,
       audioSuspendSucceeded:
@@ -112,6 +116,12 @@ export function installRuntimeLifecycleCoordinator(
         audio?.trustedInteractionTrusted === null || audio?.trustedInteractionTrusted === undefined
           ? undefined
           : Number(audio.trustedInteractionTrusted),
+      audioTrustedEventType: audio?.trustedEventType ?? undefined,
+      audioTrustedEventTimestampMs: audio?.trustedEventTimestampMs ?? undefined,
+      audioTrustedResumeCallTimestampMs: audio?.trustedResumeCallTimestampMs ?? undefined,
+      audioTrustedResumeResultTimestampMs: audio?.trustedResumeResultTimestampMs ?? undefined,
+      audioGraphRebuildResult: audio?.graphRebuildResult == null ? undefined : Number(audio.graphRebuildResult),
+      audioGraphRebuildTimestampMs: audio?.graphRebuildTimestampMs ?? undefined,
       audioLiveStreamedBuffers: audio?.buffers.filter((item) => item.playing && item.lifecycleWasLiveStreamed).length,
       audioWorkletModuleLoaded: audio ? Number(audio.audioWorkletModuleLoaded) : undefined,
       audioBufferStates: audio?.buffers
@@ -182,6 +192,41 @@ export function installRuntimeLifecycleCoordinator(
     });
   };
 
+  const scheduleRecoveryProbes = (label: string, timestamp: number, baseline: VmAudioLifecycleSnapshot) => {
+    for (const delay of [250, 1_000]) {
+      const timer = window.setTimeout(() => {
+        postRecoveryTimers.delete(timer);
+        if (disposed || appPhase !== 'foreground') return;
+        const started = performance.now();
+        void vm.lifecycle('probe').then((result) => {
+          const current = result.audio.buffers.find((item) => item.playing);
+          const previous = baseline.buffers.find((item) => item.playing && item.ordinal === current?.ordinal);
+          report(
+            `audio-${label}-${delay}ms`,
+            timestamp,
+            result.worker,
+            result.audio,
+            {
+              postRecoveryProbeMs: delay,
+              postRecoveryContextDeltaSeconds:
+                result.audio.contextTimeSeconds == null || baseline.contextTimeSeconds == null
+                  ? undefined
+                  : result.audio.contextTimeSeconds - baseline.contextTimeSeconds,
+              postRecoveryCursorDeltaFrames:
+                current && previous
+                  ? (current.positionFrames - previous.positionFrames + current.totalFrames) %
+                    Math.max(1, current.totalFrames)
+                  : undefined,
+              workerResponseMs: performance.now() - started,
+            },
+            result.framePipeline,
+          );
+        });
+      }, delay);
+      postRecoveryTimers.add(timer);
+    }
+  };
+
   const failClosed = (reason: string, timestamp: number) => {
     if (recoveryShown) return;
     recoveryShown = true;
@@ -201,7 +246,10 @@ export function installRuntimeLifecycleCoordinator(
     if (disposed || (phase !== 'background' && phase !== 'foreground')) return;
     const timestamp =
       typeof timestampValue === 'number' && Number.isFinite(timestampValue) ? timestampValue : Date.now();
+    const webEventReceivedAtMs = Date.now();
     if (phase === 'background') {
+      for (const timer of postRecoveryTimers) window.clearTimeout(timer);
+      postRecoveryTimers.clear();
       if (appPhase === 'background') return;
       appPhase = 'background';
       releaseInput();
@@ -210,6 +258,7 @@ export function installRuntimeLifecycleCoordinator(
         lifecyclePhase: 'background-entered',
         nativeTimestampMs: timestamp,
         documentVisibility: document.visibilityState,
+        webEventReceivedAtMs,
       });
       try {
         const before = await vm.lifecycle('probe');
@@ -228,9 +277,7 @@ export function installRuntimeLifecycleCoordinator(
           timestamp,
           paused.worker,
           paused.audio,
-          {
-            workerResponsiveBeforeBackground: 1,
-          },
+          { workerResponsiveBeforeBackground: 1, webTransitionCompletedAtMs: Date.now() },
           paused.framePipeline,
         );
       } catch {
@@ -264,7 +311,15 @@ export function installRuntimeLifecycleCoordinator(
         return;
       }
       const resumed = await vm.lifecycle('resume');
-      report('after-foreground-resume', timestamp, resumed.worker, resumed.audio, {}, resumed.framePipeline);
+      report(
+        'after-foreground-resume',
+        timestamp,
+        resumed.worker,
+        resumed.audio,
+        { webEventReceivedAtMs, webTransitionCompletedAtMs: Date.now() },
+        resumed.framePipeline,
+      );
+      scheduleRecoveryProbes('automatic', timestamp, resumed.audio);
       if (!resumed.worker.safeToResume) {
         failClosed(resumed.worker.recoveryReason ?? 'runtime-not-safe-to-resume', timestamp);
       }
@@ -311,6 +366,7 @@ export function installRuntimeLifecycleCoordinator(
     void vm.lifecycle('audio-unlock', event).then(
       (result) => {
         report('audio-unlocked-by-user', timestamp, result.worker, result.audio, {}, result.framePipeline);
+        scheduleRecoveryProbes('trusted', timestamp, result.audio);
         if (result.audio.unlockResult === false) failClosed('audio-resume-failed-after-user-interaction', timestamp);
       },
       () => {
@@ -359,6 +415,8 @@ export function installRuntimeLifecycleCoordinator(
   return () => {
     disposed = true;
     window.clearInterval(diagnosticsTimer);
+    for (const timer of postRecoveryTimers) window.clearTimeout(timer);
+    postRecoveryTimers.clear();
     window.removeEventListener('ra2-native-lifecycle', onNativeLifecycle);
     document.removeEventListener('visibilitychange', onVisibilityChange);
     for (const type of ['pointerdown', 'touchstart', 'keydown'] as const) {

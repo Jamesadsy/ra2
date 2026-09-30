@@ -1,4 +1,11 @@
-import type { PaletteState, SoundBufferState, SurfaceState, Win32Call, Win32Result } from '../win32';
+import type {
+  PaletteState,
+  SoundBufferState,
+  SoundStreamingTrace,
+  SurfaceState,
+  Win32Call,
+  Win32Result,
+} from '../win32';
 import { DEFAULT_PCM_FORMAT, parsePcmWaveFormatEx, type PcmWaveFormat } from '../audio';
 import { HYPERCALL_ACTIVE_SHELL_SURFACE, makeConstantImportStub, makeImportStub, type PeImport } from '../pe';
 import { win32ModuleOf } from './text';
@@ -150,10 +157,17 @@ const DDSCAPS_PRIMARYSURFACE = 0x0000_0200;
 /** Playback-cursor cache at the tail of guest IDirectSoundBuffer objects; vtable/refcount still occupy the first eight bytes. */
 const SOUND_POSITION_CACHE = 8;
 const SOUND_POSITION_BUDGET = 12;
+const SOUND_WRITE_POSITION_CACHE = 16;
 // Bink polls playback cursors heavily in its decoding thread. A 63-hit cache still causes about
 // 2,300 Worker-to-main-thread queries per second; 1023 hits reduce that to about 140 per second while refreshing
 // within a frame, avoiding WebAudio-message flooding and intermittent audio dropouts.
 const SOUND_POSITION_FAST_BUDGET = 1023;
+const SOUND_POSITION_STREAM_BYPASS =
+  import.meta.env?.DEV && import.meta.env.VITE_RA2_SOUND_POSITION_CACHE_BYPASS === '1';
+const SOUND_CURSOR_CONTRACT_AB = !(import.meta.env?.DEV && import.meta.env.VITE_RA2_SOUND_CURSOR_BASELINE === '1');
+/** WebAudio renders 128 output frames per quantum; reserve quanta for render, Worker delivery and worklet delivery. */
+const SOUND_RENDER_QUANTUM_FRAMES = 128;
+const SOUND_PIPELINE_QUANTA = 4;
 /** Cache the full DDSURFACEDESC at the RA2 surface-object tail for direct copying by guest Lock stubs. */
 const SURFACE_DESC_CACHE = 8;
 const SURFACE_DESC_BYTES = 108;
@@ -220,6 +234,7 @@ function makeCachedSoundPositionStub(id: number, argBytes: number): Uint8Array {
   code.push(0x85, 0xd2); // test edx, edx
   const secondNull = code.length;
   code.push(0x74, 0x00); // jz success
+  code.push(0x8b, 0x41, SOUND_WRITE_POSITION_CACHE); // mov eax, [ecx + write cursor]
   code.push(0x89, 0x02); // mov [edx], eax
   const success = code.length;
   code[secondNull + 1] = (success - (secondNull + 2)) & 0xff;
@@ -347,6 +362,34 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
     /** The native battlefield loop calls BLOCKBEGIN twice consecutively; the pair should consume only one refresh period. */
     private vblankPairSecondCall = false;
     private readonly clipperWindows = new Map<number, number>();
+    private readonly streamTraces = new Map<
+      number,
+      {
+        trace: SoundStreamingTrace;
+        refreshedAt: number;
+        emittedAt: number;
+        lastRegion: string;
+        fromWriteCursorObserved: boolean;
+      }
+    >();
+
+    /** Read-only bounded diagnostic state; samples never include PCM bytes or owner file names. */
+    getSoundStreamingTraces(): SoundStreamingTrace[] {
+      return [...this.streamTraces.values()].slice(-16).map(({ trace }) => ({ ...trace, format: { ...trace.format } }));
+    }
+
+    private emitSoundTrace(buffer: SoundBufferState, force = false): void {
+      const state = this.streamTraces.get(buffer.object);
+      if (!state) return;
+      const now = this.audioNow();
+      if (!force && now - state.emittedAt < 100) return;
+      state.emittedAt = now;
+      state.trace.observedAtMs = Date.now();
+      state.trace.frequency = buffer.frequency;
+      state.trace.playing = buffer.playing;
+      state.trace.looping = buffer.looping;
+      this.options.audio?.recordStreamTrace?.({ ...state.trace, format: { ...state.trace.format } });
+    }
 
     dispatchDirectx(key: string, name: string, a: number[]): Win32Result | null {
       switch (key) {
@@ -792,11 +835,30 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
             return { eax: 0 };
           case 'GetCurrentPosition':
             {
-              const position =
-                this.options.audio?.getState(buffer.object)?.positionBytes ?? this.soundBufferPosition(buffer);
+              const cursors = this.soundBufferCursors(buffer);
+              const position = cursors.play;
+              const streamTrace = this.streamTraces.get(buffer.object);
+              if (streamTrace) {
+                const now = this.audioNow();
+                if (streamTrace.refreshedAt > 0) {
+                  streamTrace.trace.maxCacheAgeMs = Math.max(
+                    streamTrace.trace.maxCacheAgeMs,
+                    now - streamTrace.refreshedAt,
+                  );
+                  streamTrace.trace.cacheHits += Math.max(
+                    0,
+                    SOUND_POSITION_FAST_BUDGET - this.readU32(buffer.object + SOUND_POSITION_BUDGET),
+                  );
+                }
+                streamTrace.refreshedAt = now;
+                streamTrace.trace.hostRefreshes++;
+                streamTrace.trace.workerPlayCursor = position;
+                streamTrace.trace.returnedWriteCursor = cursors.write;
+                streamTrace.trace.candidateSafeWriteCursor = cursors.candidate;
+              }
               if (a[1]) this.writeU32(a[1], position);
-              if (a[2]) this.writeU32(a[2], position);
-              this.cacheSoundBufferPosition(buffer, position);
+              if (a[2]) this.writeU32(a[2], cursors.write);
+              this.cacheSoundBufferPosition(buffer, cursors.play, cursors.write);
             }
             return { eax: 0 };
           case 'GetFormat':
@@ -827,15 +889,47 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
             // uses these to maintain ring buffers. Ignoring ENTIREBUFFER with bytes=0
             // returns an empty lock, so only the prefilled portion plays.
             if ((flags & 1) !== 0) {
-              buffer.position =
-                this.options.audio?.getState(buffer.object)?.positionBytes ?? this.soundBufferPosition(buffer);
+              const streamTrace = this.streamTraces.get(buffer.object);
+              if (streamTrace) streamTrace.fromWriteCursorObserved = true;
+              buffer.position = this.soundBufferCursors(buffer).play;
               buffer.startedAt = this.audioNow();
               this.invalidateSoundBufferPosition(buffer);
             }
-            const offset = Math.min((flags & 1) !== 0 ? buffer.position : (a[1] ?? 0), buffer.size);
+            const cursors = this.soundBufferCursors(buffer);
+            const offset = Math.min((flags & 1) !== 0 ? cursors.write : (a[1] ?? 0), buffer.size);
             const requested = (flags & 2) !== 0 ? buffer.size : Math.min(a[2] ?? 0, buffer.size);
             const first = Math.min(requested, buffer.size - offset);
             const second = requested - first;
+            const streamTrace = this.streamTraces.get(buffer.object);
+            if (streamTrace) {
+              const trace = streamTrace.trace;
+              const play = cursors.play;
+              const align = Math.max(1, buffer.format.nBlockAlign);
+              const quantum = Math.min(buffer.size, 128 * align);
+              const active = (play + quantum) % buffer.size;
+              const overlaps = (start: number, count: number) =>
+                count > 0 &&
+                (quantum >= buffer.size ||
+                  (play < active ? start < active && start + count > play : start < active || start + count > play));
+              const region = `${offset}:${first}:${second}`;
+              if (region === streamTrace.lastRegion) trace.repeatedRegionCount++;
+              streamTrace.lastRegion = region;
+              Object.assign(trace, {
+                workerPlayCursor: play,
+                returnedWriteCursor: cursors.write,
+                candidateSafeWriteCursor: cursors.candidate,
+                lockFlags: flags,
+                requestedOffset: a[1] ?? 0,
+                requestedBytes: a[2] ?? 0,
+                resolvedOrigin: offset,
+                firstOffset: offset,
+                firstBytes: first,
+                secondOffset: 0,
+                secondBytes: second,
+                unsafeOverlap: overlaps(offset, first) || overlaps(0, second),
+              });
+              this.emitSoundTrace(buffer);
+            }
             if (a[3]) this.writeU32(a[3], buffer.data + offset);
             if (a[4]) this.writeU32(a[4], first);
             if (a[5]) this.writeU32(a[5], second ? buffer.data : 0);
@@ -913,6 +1007,13 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
             this.options.audio?.setFrequency(buffer.object, a[1] ?? 0);
             return { eax: 0 };
           case 'Unlock':
+            {
+              const streamTrace = this.streamTraces.get(buffer.object);
+              if (streamTrace) {
+                streamTrace.trace.unlockBytes += (a[2] ?? 0) + (a[4] ?? 0);
+                this.emitSoundTrace(buffer);
+              }
+            }
             this.syncSoundRange(buffer, a[1] ?? 0, a[2] ?? 0);
             this.syncSoundRange(buffer, a[3] ?? 0, a[4] ?? 0);
             return { eax: 0 };
@@ -992,7 +1093,7 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
       format: PcmWaveFormat = { ...DEFAULT_PCM_FORMAT },
     ): SoundBufferState | null {
       const safeSize = Math.max(1, Math.min(size || 65_536, 4 * 1024 * 1024));
-      const object = this.createComObject('IDirectSoundBuffer', SOUND_BUFFER_METHODS, 'DSOUND.COM', 16);
+      const object = this.createComObject('IDirectSoundBuffer', SOUND_BUFFER_METHODS, 'DSOUND.COM', 20);
       if (!object) return null;
       const data = this.alloc(safeSize, true);
       if (!data) {
@@ -1013,19 +1114,78 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
         frequency: format.nSamplesPerSec,
       };
       this.soundBuffers.set(object, buffer);
+      this.streamTraces.set(object, {
+        refreshedAt: 0,
+        emittedAt: 0,
+        lastRegion: '',
+        fromWriteCursorObserved: false,
+        trace: {
+          id: object,
+          size: safeSize,
+          format: { ...format },
+          frequency: buffer.frequency,
+          playing: false,
+          looping: false,
+          workerPlayCursor: 0,
+          returnedWriteCursor: 0,
+          candidateSafeWriteCursor: 0,
+          cacheHits: 0,
+          hostRefreshes: 0,
+          maxCacheAgeMs: 0,
+          lockFlags: 0,
+          requestedOffset: 0,
+          requestedBytes: 0,
+          resolvedOrigin: 0,
+          firstOffset: 0,
+          firstBytes: 0,
+          secondOffset: 0,
+          secondBytes: 0,
+          unsafeOverlap: false,
+          unlockBytes: 0,
+          repeatedRegionCount: 0,
+          observedAtMs: Date.now(),
+        },
+      });
+      this.emitSoundTrace(buffer, true);
       this.invalidateSoundBufferPosition(buffer);
       this.options.audio?.createBuffer(object, safeSize, buffer.format);
       return buffer;
     }
 
-    private cacheSoundBufferPosition(buffer: SoundBufferState, position: number): void {
-      this.writeU32(buffer.object + SOUND_POSITION_CACHE, position >>> 0);
-      this.writeU32(buffer.object + SOUND_POSITION_BUDGET, SOUND_POSITION_FAST_BUDGET);
+    private cacheSoundBufferPosition(buffer: SoundBufferState, play: number, write: number): void {
+      this.writeU32(buffer.object + SOUND_POSITION_CACHE, play >>> 0);
+      this.writeU32(buffer.object + SOUND_WRITE_POSITION_CACHE, write >>> 0);
+      const streamed = this.streamTraces.get(buffer.object)?.fromWriteCursorObserved;
+      this.writeU32(
+        buffer.object + SOUND_POSITION_BUDGET,
+        SOUND_POSITION_STREAM_BYPASS && streamed ? 0 : SOUND_POSITION_FAST_BUDGET,
+      );
     }
 
     private invalidateSoundBufferPosition(buffer: SoundBufferState): void {
       this.writeU32(buffer.object + SOUND_POSITION_CACHE, buffer.position >>> 0);
+      this.writeU32(buffer.object + SOUND_WRITE_POSITION_CACHE, buffer.position >>> 0);
       this.writeU32(buffer.object + SOUND_POSITION_BUDGET, 0);
+    }
+
+    private soundBufferCursors(buffer: SoundBufferState): { play: number; write: number; candidate: number } {
+      const model = this.soundBufferPosition(buffer);
+      const consumer = this.options.audio?.getConsumerCursor?.(buffer.object);
+      const host = this.options.audio?.getState(buffer.object)?.positionBytes;
+      const align = Math.max(1, buffer.format.nBlockAlign);
+      const size = Math.floor(buffer.size / align) * align;
+      const rawPlay = SOUND_CURSOR_CONTRACT_AB ? (consumer?.positionBytes ?? host ?? model) : (host ?? model);
+      const play = size > 0 ? (Math.floor(Math.max(0, rawPlay) / align) * align) % size : 0;
+      const outputRate = consumer?.outputSampleRateHz ?? buffer.format.nSamplesPerSec;
+      // The consumer sample is extrapolated to now; its age is not an additional lead.
+      const latencyMs = consumer ? consumer.transportLatencyMs * 2 : 0;
+      const leadFrames = Math.ceil(
+        (SOUND_PIPELINE_QUANTA * SOUND_RENDER_QUANTUM_FRAMES * buffer.frequency) / Math.max(1, outputRate) +
+          (latencyMs * buffer.frequency) / 1000,
+      );
+      const leadBytes = Math.min(Math.max(0, size - align), Math.max(1, leadFrames) * align);
+      const candidate = buffer.playing && size > 0 ? (play + leadBytes) % size : play;
+      return { play, write: SOUND_CURSOR_CONTRACT_AB ? candidate : play, candidate };
     }
     /**
      * In the normal browser path the VM runs in a Worker while WebAudio runs on the main thread, preventing synchronous getState. Maintain DirectSound cursors from host monotonic time and PCM frame rate so RA2's streaming decoder can identify consumed ring regions and refill them promptly.
@@ -1600,6 +1760,7 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
       const sound = this.soundBuffers.get(object);
       if (sound) {
         this.soundBuffers.delete(object);
+        this.streamTraces.delete(object);
         this.freeAllocation(sound.data);
         this.options.audio?.releaseBuffer(object);
       }

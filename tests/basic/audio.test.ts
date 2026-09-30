@@ -1,11 +1,12 @@
 /**
  * Migrated audio smoke tests: WAVEFORMATEX parsing, DirectSound volume/pan conversion, and the event sequence from the DirectSound COM bridge (CreateSoundBuffer/Lock/Unlock/Play) to Win32AudioSink.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   directSoundPanToStereo,
   directSoundVolumeToGain,
   parsePcmWaveFormatEx,
+  readPcmSample,
   WebAudioPcmSink,
   type PcmWaveFormat,
 } from '../../src/adapter/audio';
@@ -36,6 +37,18 @@ const waveFormat = Uint8Array.from([
 ]);
 
 describe('WAVEFORMATEX 与音量/声像换算（原 audioSmoke）', () => {
+  it('keeps signed and unsigned PCM sample widths distinct', () => {
+    const sample = (bytes: number[], bits: number) =>
+      readPcmSample(new DataView(Uint8Array.from(bytes).buffer), 0, bits);
+    expect(sample([0], 8)).toBe(-1);
+    expect(sample([128], 8)).toBe(0);
+    expect(sample([0, 128], 16)).toBe(-1);
+    expect(sample([255, 127], 16)).toBeCloseTo(1, 4);
+    expect(sample([0, 0, 128], 24)).toBe(-1);
+    expect(sample([255, 255, 127], 24)).toBeCloseTo(1, 6);
+    expect(sample([0, 0, 0, 128], 32)).toBe(-1);
+    expect(sample([255, 255, 255, 127], 32)).toBeCloseTo(1, 9);
+  });
   it('parsePcmWaveFormatEx 按 offset 解析 PCM 格式头', () => {
     expect(parsePcmWaveFormatEx(waveFormat, 2)).toEqual({
       wFormatTag: 1,
@@ -194,6 +207,130 @@ const createWorkerLikeAudio = (): Win32AudioSink => ({
 });
 
 describe('DirectSound 流式音乐（RA2 增补，原 audioSmoke）', () => {
+  it('A/B corrected write cursor wraps on a frame boundary and FROMWRITECURSOR preserves both Unlock regions', () => {
+    if (import.meta.env.DEV && import.meta.env.VITE_RA2_SOUND_CURSOR_BASELINE === '1') return;
+    const now = vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    try {
+      const memory = createGuestMemory(12 * 1024 * 1024);
+      const writes: Array<[number, number]> = [];
+      const audio: Win32AudioSink = {
+        ...createWorkerLikeAudio(),
+        writeBuffer(_id, offset, bytes) {
+          writes.push([offset, bytes.length]);
+          return bytes.length;
+        },
+      };
+      const shim = createTestShim(memory, { firstDynamicId: 1, audio });
+      const call = (key: string, args: number[]) => callShim(shim, key, args, 0x2000);
+      memory.write_memory(waveFormat.subarray(2), 0x1100);
+      writeU32(memory, 0x1000, 20);
+      writeU32(memory, 0x1008, 88_200);
+      writeU32(memory, 0x1010, 0x1100);
+      expect(call('DSOUND.COM!IDirectSound.CreateSoundBuffer', [0, 0x1000, 0x1200, 0]).eax).toBe(0);
+      const id = readU32(memory, 0x1200);
+      expect(call('DSOUND.COM!IDirectSoundBuffer.SetCurrentPosition', [id, 86_024]).eax).toBe(0);
+      expect(call('DSOUND.COM!IDirectSoundBuffer.Play', [id, 0, 0, 1]).eax).toBe(0);
+      expect(call('DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [id, 0x1210, 0x1214]).eax).toBe(0);
+      expect(readU32(memory, 0x1210)).toBe(86_024);
+      expect(readU32(memory, 0x1214)).toBe(88_072);
+      expect(readU32(memory, 0x1214) % 4).toBe(0);
+      expect(call('DSOUND.COM!IDirectSoundBuffer.Lock', [id, 99, 512, 0x1220, 0x1224, 0x1228, 0x122c, 1]).eax).toBe(0);
+      expect(readU32(memory, 0x1224)).toBe(128);
+      expect(readU32(memory, 0x122c)).toBe(384);
+      expect(
+        call('DSOUND.COM!IDirectSoundBuffer.Unlock', [id, readU32(memory, 0x1220), 128, readU32(memory, 0x1228), 384])
+          .eax,
+      ).toBe(0);
+      expect(writes).toEqual([
+        [88_072, 128],
+        [0, 384],
+      ]);
+      expect(shim.getSoundStreamingTraces().find((item) => item.id === id)).toMatchObject({
+        resolvedOrigin: 88_072,
+        firstBytes: 128,
+        secondBytes: 384,
+        unlockBytes: 512,
+        unsafeOverlap: false,
+      });
+    } finally {
+      now.mockRestore();
+    }
+  });
+  it('samples cache wall age and repeated streaming writes without recording PCM', () => {
+    const tick = vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    try {
+      const memory = createGuestMemory(12 * 1024 * 1024);
+      const shim = createTestShim(memory, { firstDynamicId: 1, audio: createWorkerLikeAudio() });
+      const call = (key: string, args: number[]) => callShim(shim, key, args, 0x2000);
+      memory.write_memory(waveFormat.subarray(2), 0x1100);
+      writeU32(memory, 0x1000, 20);
+      writeU32(memory, 0x1008, 88_200);
+      writeU32(memory, 0x1010, 0x1100);
+      expect(call('DSOUND.COM!IDirectSound.CreateSoundBuffer', [0, 0x1000, 0x1200, 0]).eax).toBe(0);
+      const id = readU32(memory, 0x1200);
+      expect(call('DSOUND.COM!IDirectSoundBuffer.Play', [id, 0, 0, 1]).eax).toBe(0);
+      expect(call('DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [id, 0x1210, 0x1214]).eax).toBe(0);
+      writeU32(memory, id + 12, 1000); // 23 guest fast-stub hits since the last host refresh.
+      tick.mockReturnValue(1_125);
+      expect(call('DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [id, 0x1210, 0x1214]).eax).toBe(0);
+      let trace = shim.getSoundStreamingTraces().find((item) => item.id === id)!;
+      expect(trace.cacheHits).toBe(23);
+      expect(trace.maxCacheAgeMs).toBe(125);
+      expect(trace.hostRefreshes).toBe(2);
+      if (import.meta.env.DEV && import.meta.env.VITE_RA2_SOUND_CURSOR_BASELINE === '1') return;
+      for (let step = 0; step < 100; step++) {
+        tick.mockReturnValue(1_130 + step * 7);
+        expect(call('DSOUND.COM!IDirectSoundBuffer.Lock', [id, 0, 512, 0x1220, 0x1224, 0x1228, 0x122c, 1]).eax).toBe(0);
+        trace = shim.getSoundStreamingTraces().find((item) => item.id === id)!;
+        expect(trace.unsafeOverlap).toBe(false);
+        expect(trace.resolvedOrigin % 4).toBe(0);
+        expect(readU32(memory, 0x1224) + readU32(memory, 0x122c)).toBe(512);
+      }
+    } finally {
+      tick.mockRestore();
+    }
+  });
+  it('records the cursor and FROMWRITECURSOR A/B without PCM contents', () => {
+    const memory = createGuestMemory(12 * 1024 * 1024);
+    const shim = createTestShim(memory, { firstDynamicId: 1, audio: createWorkerLikeAudio() });
+    const dispatchSound = (key: string, args: number[]) => callShim(shim, key, args, 0x2000);
+    const desc = 0x1000;
+    const formatPtr = 0x1100;
+    const objectOut = 0x1200;
+    memory.write_memory(waveFormat.subarray(2), formatPtr);
+    writeU32(memory, desc, 20);
+    writeU32(memory, desc + 8, 88_200);
+    writeU32(memory, desc + 16, formatPtr);
+    expect(dispatchSound('DSOUND.COM!IDirectSound.CreateSoundBuffer', [0, desc, objectOut, 0]).eax).toBe(0);
+    const object = readU32(memory, objectOut);
+    expect(dispatchSound('DSOUND.COM!IDirectSoundBuffer.Play', [object, 0, 0, 1]).eax).toBe(0);
+    const playOut = 0x1210;
+    const writeOut = 0x1214;
+    expect(dispatchSound('DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [object, playOut, writeOut]).eax).toBe(0);
+    const corrected = !(import.meta.env.DEV && import.meta.env.VITE_RA2_SOUND_CURSOR_BASELINE === '1');
+    if (corrected) expect(readU32(memory, writeOut)).not.toBe(readU32(memory, playOut));
+    else expect(readU32(memory, writeOut)).toBe(readU32(memory, playOut));
+    expect(readU32(memory, object + 12)).toBe(1023);
+    const pointerOut = 0x1220;
+    const bytesOut = 0x1224;
+    expect(
+      dispatchSound('DSOUND.COM!IDirectSoundBuffer.Lock', [object, 40_000, 512, pointerOut, bytesOut, 0, 0, 1]).eax,
+    ).toBe(0);
+    const trace = shim.getSoundStreamingTraces().find((item) => item.id === object)!;
+    expect(trace).toMatchObject({
+      size: 88_200,
+      lockFlags: 1,
+      requestedOffset: 40_000,
+      requestedBytes: 512,
+      firstBytes: 512,
+      hostRefreshes: 1,
+      unsafeOverlap: !corrected,
+    });
+    expect(trace.resolvedOrigin).toBe(trace.returnedWriteCursor);
+    if (!corrected) expect(trace.returnedWriteCursor).toBe(trace.workerPlayCursor);
+    expect(readU32(memory, pointerOut)).toBeGreaterThan(0);
+    expect(readU32(memory, bytesOut)).toBe(512);
+  });
   // Streaming music regression: after Unlock overwrites a playing DirectSound ring buffer,
   // switch to a single live reader; do not keep looping the first snapshot or recreate the source for every write.
   it('环形 buffer 首次动态覆写后切到实时 PCM 流且保持连续游标', () => {

@@ -23,6 +23,7 @@ import type { GameResolution } from '../games/resolution';
 import {
   reportNativeRuntimeError,
   reportNativeRuntimeEvent,
+  reportNativeRuntimeMetrics,
   reportNativeRuntimePhase,
 } from '../platform/browser/nativeDiagnostics';
 
@@ -62,6 +63,7 @@ interface PendingRequest {
  * The public interface matches Win32GameVm (VmShell), keeping page.ts independent of the execution thread.
  */
 export class WorkerVmClient implements VmShell {
+  private lastStreamTraceAt = 0;
   readonly runtimeInfo: VmRuntimeInfo = {
     mode: 'worker',
     reason: 'default',
@@ -111,6 +113,11 @@ export class WorkerVmClient implements VmShell {
           reportNativeRuntimeError('audio', error);
         },
         diagnosticsIntervalMs: AUDIO_DIAGNOSTICS_INTERVAL_MS,
+        foregroundRecoveryPolicy:
+          typeof window !== 'undefined' &&
+          (window as Window & { __RA2Host?: { platform?: string; version?: number } }).__RA2Host?.platform === 'ios'
+            ? 'fresh-context-on-trusted-input'
+            : 'same-context',
       });
     if (typeof window !== 'undefined' && new URLSearchParams(window.location?.search ?? '').get('debug') === '1') {
       this.audioProgressProbe = () => this.audio.getProgressSnapshot();
@@ -593,6 +600,61 @@ export class WorkerVmClient implements VmShell {
 
   private applyAudioOp(op: AudioOp): void {
     switch (op.op) {
+      case 'streamTrace': {
+        const now = performance.now();
+        if (now - this.lastStreamTraceAt < 100) break;
+        this.lastStreamTraceAt = now;
+        const trace = op.trace;
+        const consumer = this.audio.getStreamCursorTrace(trace.id);
+        const workerToMainAgeMs = Math.max(0, Date.now() - trace.observedAtMs);
+        if (consumer?.sampleRate && this.lifecycleState === 'active') {
+          this.worker.postMessage({
+            type: 'audio-cursor',
+            id: trace.id,
+            positionBytes: consumer.cursor,
+            playing: consumer.playing,
+            byteLength: consumer.byteLength,
+            blockAlign: consumer.blockAlign,
+            frequency: consumer.frequency,
+            outputSampleRateHz: consumer.sampleRate,
+            observedAtEpochMs: Date.now(),
+            transportLatencyMs: workerToMainAgeMs,
+          });
+        }
+        reportNativeRuntimeMetrics({
+          event: 'audio-stream',
+          bufferId: trace.id,
+          bufferBytes: trace.size,
+          formatTag: trace.format.wFormatTag,
+          channels: trace.format.nChannels,
+          sampleRateHz: trace.format.nSamplesPerSec,
+          bitsPerSample: trace.format.wBitsPerSample,
+          blockAlign: trace.format.nBlockAlign,
+          frequencyHz: trace.frequency,
+          workerPlayCursor: trace.workerPlayCursor,
+          returnedWriteCursor: trace.returnedWriteCursor,
+          candidateSafeWriteCursor: trace.candidateSafeWriteCursor,
+          cacheHits: trace.cacheHits,
+          hostRefreshes: trace.hostRefreshes,
+          maxCacheAgeMs: trace.maxCacheAgeMs,
+          lockFlags: trace.lockFlags,
+          requestedOffset: trace.requestedOffset,
+          requestedBytes: trace.requestedBytes,
+          resolvedOrigin: trace.resolvedOrigin,
+          firstOffset: trace.firstOffset,
+          firstBytes: trace.firstBytes,
+          secondOffset: trace.secondOffset,
+          secondBytes: trace.secondBytes,
+          unsafeOverlap: Number(trace.unsafeOverlap),
+          unlockBytes: trace.unlockBytes,
+          repeatedRegionCount: trace.repeatedRegionCount,
+          consumerCursor: consumer?.cursor,
+          consumerCursorAgeMs: consumer?.ageMs ?? undefined,
+          consumerContextTime: consumer?.contextTime ?? undefined,
+          workerToMainAgeMs,
+        });
+        break;
+      }
       case 'createBuffer':
         this.audio.createBuffer(op.id, op.byteLength, op.format);
         break;

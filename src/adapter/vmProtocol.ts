@@ -1,7 +1,7 @@
 import type { GamePerformanceSample } from '../games/performance';
 import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
-import type { VmFrame, Win32Call, VmNetworkStatus } from '../vm86/win32';
+import type { VmFrame, Win32Call, VmNetworkStatus, SoundStreamingTrace } from '../vm86/win32';
 import type { SupportedGameId } from '../games/catalog';
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmAttachResult, VmPointerState } from './vmShell';
@@ -66,6 +66,18 @@ export type MainToWorkerMessage =
   | { type: 'cursor'; x: number; y: number }
   | { type: 'clock'; rate: number }
   | { type: 'volume'; linear: number }
+  | {
+      type: 'audio-cursor';
+      id: number;
+      positionBytes: number;
+      playing: boolean;
+      byteLength: number;
+      blockAlign: number;
+      frequency: number;
+      outputSampleRateHz: number;
+      observedAtEpochMs: number;
+      transportLatencyMs: number;
+    }
   | { type: 'call-tracing'; enabled: boolean }
   | { type: 'state'; kind: 'pointer'; requestId: number }
   | { type: 'guest-speed-flag'; value: number; requestId: number }
@@ -126,7 +138,8 @@ export type AudioOp =
   | { op: 'setVolume'; id: number; volume: number }
   | { op: 'setPan'; id: number; pan: number }
   | { op: 'setFrequency'; id: number; frequency: number }
-  | { op: 'releaseBuffer'; id: number };
+  | { op: 'releaseBuffer'; id: number }
+  | { op: 'streamTrace'; trace: SoundStreamingTrace };
 
 let nextRequestId = 1;
 /** Monotonically increasing requestId, unique within a session; independent counters on each thread do not affect correlation. */

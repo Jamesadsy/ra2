@@ -215,7 +215,7 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
         browser.backgroundColor = view.backgroundColor
         browser.accessibilityIdentifier = "ra2-route-b-webview"
         webView = browser
-        lifecycle = RuntimeLifecycleCoordinator(webView: browser)
+        lifecycle = RuntimeLifecycleCoordinator(webView: browser, diagnostics: diagnostics)
         view.insertSubview(browser, at: 0)
         NSLayoutConstraint.activate([
             browser.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -419,13 +419,17 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
     private func observeApplicationLifecycle() {
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            let notificationMs = Date().timeIntervalSince1970 * 1_000
             Task { @MainActor in
+                self?.diagnostics.recordNativeMetrics("audio lifecycle notification=didEnterBackground epochMs=\(notificationMs)")
                 self?.diagnostics.recordEvent("application entered background")
                 self?.lifecycle?.applicationDidEnterBackground()
             }
         })
         observers.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            let notificationMs = Date().timeIntervalSince1970 * 1_000
             Task { @MainActor in
+                self?.diagnostics.recordNativeMetrics("audio lifecycle notification=willEnterForeground epochMs=\(notificationMs)")
                 self?.diagnostics.recordEvent("application entered foreground")
                 self?.lifecycle?.applicationWillEnterForeground()
             }

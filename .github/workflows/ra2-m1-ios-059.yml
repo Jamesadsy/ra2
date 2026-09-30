@@ -95,6 +95,7 @@ jobs:
           pnpm run test:browser:touch-ui
           pnpm run test:browser:audio
           pnpm run test:browser:audio-gesture
+          RA2_BROWSER_FRESH_CONTEXT=1 pnpm run test:browser:audio-gesture
           pnpm run test:browser:cold-save
           pnpm run test:browser:tap-start
 

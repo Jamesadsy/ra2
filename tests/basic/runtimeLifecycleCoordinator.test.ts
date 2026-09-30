@@ -72,6 +72,8 @@ function setup(resumeWorker = workerSnapshot()) {
   const win = Object.assign(new EventTarget(), {
     setInterval: () => 1,
     clearInterval: vi.fn(),
+    setTimeout: vi.fn(() => 2),
+    clearTimeout: vi.fn(),
     __RA2Host: { platform: 'ios', version: 1, ownerDataToken: 'must-not-leak' },
   });
   const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
