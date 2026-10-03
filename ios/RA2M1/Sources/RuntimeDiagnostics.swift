@@ -383,7 +383,7 @@ final class RuntimeDiagnosticsLog {
                     "guestWidth", "guestHeight", "canvasCssWidth", "canvasCssHeight",
                     "canvasBackingWidth", "canvasBackingHeight", "fps", "firstGestureTimestampMs",
                     "bufferId", "bufferBytes", "formatTag", "channels", "sampleRateHz", "bitsPerSample", "blockAlign", "frequencyHz",
-                    "workerPlayCursor", "returnedWriteCursor", "candidateSafeWriteCursor", "cacheHits", "hostRefreshes", "maxCacheAgeMs",
+                    "workerPlayCursor", "returnedWriteCursor", "candidateSafeWriteCursor", "cacheHits", "hostRefreshes", "maxCacheAgeMs", "producerCursorUncached",
                     "lockFlags", "requestedOffset", "requestedBytes", "resolvedOrigin", "firstOffset", "firstBytes", "secondOffset",
                     "secondBytes", "unsafeOverlap", "unlockBytes", "repeatedRegionCount", "consumerCursor", "consumerCursorAgeMs",
                     "consumerContextTime", "workerToMainAgeMs", "audioReaderGeneration", "audioReaderSequence", "audioReaderAuthoritative",

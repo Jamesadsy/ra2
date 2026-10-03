@@ -791,14 +791,18 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
             } catch {
               return { eax: 0x8878_0064 }; // DSERR_BADFORMAT
             }
-            const buffer = this.createSoundBuffer(this.readU32(a[1] + 8), format);
+            const primary = (this.readU32(a[1] + 4) & 1) !== 0;
+            const uncachedPosition =
+              !primary &&
+              !!this.gameProfile.uncachedAudioProducerDlls?.some((dll) => this.guestCallerInDll(call.stack, dll));
+            const buffer = this.createSoundBuffer(this.readU32(a[1] + 8), format, uncachedPosition);
             this.writeU32(a[2], buffer?.object ?? 0);
             return { eax: buffer ? 0 : OUT_OF_MEMORY };
           }
           case 'DuplicateSoundBuffer': {
             const source = this.soundBuffers.get(a[1] ?? 0);
             if (!source || !a[2]) return { eax: 0x8878_001e };
-            const duplicate = this.createSoundBuffer(source.size, source.format);
+            const duplicate = this.createSoundBuffer(source.size, source.format, source.uncachedPosition);
             if (!duplicate) {
               this.writeU32(a[2], 0);
               return { eax: OUT_OF_MEMORY };
@@ -840,7 +844,9 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
               if (streamTrace) {
                 const now = this.audioNow();
                 const cacheBypassActive =
-                  cursors.authoritative || (SOUND_POSITION_STREAM_BYPASS && streamTrace.fromWriteCursorObserved);
+                  buffer.uncachedPosition ||
+                  cursors.authoritative ||
+                  (SOUND_POSITION_STREAM_BYPASS && streamTrace.fromWriteCursorObserved);
                 if (streamTrace.refreshedAt > 0 && !cacheBypassActive) {
                   streamTrace.trace.maxCacheAgeMs = Math.max(
                     streamTrace.trace.maxCacheAgeMs,
@@ -1092,6 +1098,7 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
     protected createSoundBuffer(
       size: number,
       format: PcmWaveFormat = { ...DEFAULT_PCM_FORMAT },
+      uncachedPosition = false,
     ): SoundBufferState | null {
       const safeSize = Math.max(1, Math.min(size || 65_536, 4 * 1024 * 1024));
       const object = this.createComObject('IDirectSoundBuffer', SOUND_BUFFER_METHODS, 'DSOUND.COM', 20);
@@ -1113,6 +1120,7 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
         volume: 0,
         pan: 0,
         frequency: format.nSamplesPerSec,
+        uncachedPosition,
       };
       this.soundBuffers.set(object, buffer);
       this.streamTraces.set(object, {
@@ -1122,6 +1130,7 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
         fromWriteCursorObserved: false,
         trace: {
           id: object,
+          producerCursorUncached: uncachedPosition,
           size: safeSize,
           format: { ...format },
           frequency: buffer.frequency,
@@ -1164,7 +1173,9 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
       const streamed = this.streamTraces.get(buffer.object)?.fromWriteCursorObserved;
       this.writeU32(
         buffer.object + SOUND_POSITION_BUDGET,
-        authoritative || (SOUND_POSITION_STREAM_BYPASS && streamed) ? 0 : SOUND_POSITION_FAST_BUDGET,
+        buffer.uncachedPosition || authoritative || (SOUND_POSITION_STREAM_BYPASS && streamed)
+          ? 0
+          : SOUND_POSITION_FAST_BUDGET,
       );
     }
 

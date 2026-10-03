@@ -267,6 +267,7 @@ export interface SoundConsumerCursor {
 
 export interface SoundStreamingTrace {
   id: number;
+  producerCursorUncached: boolean;
   size: number;
   format: PcmWaveFormat;
   frequency: number;
@@ -366,6 +367,8 @@ export interface SoundBufferState {
   volume: number;
   pan: number;
   frequency: number;
+  /** Producer identity established at creation; active before the first playing refill or shared reader exists. */
+  uncachedPosition: boolean;
 }
 
 export interface GdiDcState {

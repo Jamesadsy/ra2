@@ -33,6 +33,9 @@ export const RA2_SHIM_PROFILE: GameShimProfile = Object.freeze({
   // may repeatedly use native Bink. Deferred unlocking in BinkClose prevents thread switches until the preceding instance has fully exited,
   // so reopening it on return to the main menu cannot corrupt guest context.
   skipIncompleteBinkPlayback: true,
+  // Bink 1.0p polls at frame/service cadence and refills with explicit Lock offsets. Waiting for
+  // FROMWRITECURSOR or a first playing overwrite leaves its initial prefill behind the 1023-poll cache.
+  uncachedAudioProducerDlls: Object.freeze(['binkw32.dll']),
   // Persist native objects through bounded, scheduler-aware COM callback slots.
   skipGuestOleSaveToStream: false,
   guestDllPatches: Object.freeze({

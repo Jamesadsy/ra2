@@ -69,6 +69,8 @@ export interface GameShimProfile {
   readonly skipIncompleteBinkPlayback?: boolean;
   /** Maximum original Bink instances per VM session; games with unstable old-DLL reentry may limit this to 1. */
   readonly nativeBinkPlaybackLimit?: number;
+  /** Streaming producer DLLs whose secondary DirectSound buffers require fresh queries before their first refill. */
+  readonly uncachedAudioProducerDlls?: readonly string[];
   /**
    * When a guest IPersistStream::Save bridge is unsafe in v86, handle OleSaveToStream as a successful compatibility stub. Structured-storage wrappers remain active, but guest object serialization does not run.
    */

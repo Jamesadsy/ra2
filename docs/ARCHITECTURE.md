@@ -104,6 +104,8 @@ The port bridge combines already-pending data and acknowledges batches. WebSocke
 
 ## Verification design
 
+RA2 special-media secondary buffers use an injected loaded-producer policy to bypass the guest cursor cache before their first playing refill. The generic shim keeps ordinary producer caching and explicit Lock origins. See [special-media audio advancement](RA2_SPECIAL_MEDIA_AUDIO.md) for the native source trace and consumer/producer ownership contract.
+
 `tests/basic/architecture/dependencies.test.ts` automatically checks dependency boundaries. Pure logic and synthetic VM tests do not read game assets. Instruction fixtures verify ABI and patch behavior inside real v86. Separate real-game tests use hash-validated assets to verify native startup, frames, player state, and command execution on both clients.
 
 Public CI and asset-enabled CI are separate: the former accepts contribution checks in isolated environments, while the latter runs reviewed code only. Performance conclusions use native frame counters and measured time in the same scenario. Target FPS, microbenchmarks, and passing short matches cannot establish long-match stability. See [Testing](TESTING.md) and [Real-game CI](REAL_GAME_CI.md) for entry points and requirements.

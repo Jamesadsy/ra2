@@ -59,6 +59,8 @@ Fixed-address/instruction evidence lives in game modules and their tests. Never 
 
 ## Save and cold-load regression
 
+Special-media startup/refill acceptance uses `pnpm exec vitest run tests/basic/vm/specialMediaAudio.e2e.test.ts` and `pnpm exec tsx tests/basic/browser/specialMediaAudioBrowserSmoke.mts` against the development origin. The latter prefills before Play and verifies the first explicit refill can activate the real shared reader. See [the native producer evidence and limits](RA2_SPECIAL_MEDIA_AUDIO.md); synthetic silence does not establish audible cameo continuity on an iPhone.
+
 `pnpm run check` runs the asset-free OLE callback, storage metadata, asynchronous file-open, time conversion, and window-order regressions: `tests/basic/vm/olePersistence.e2e.test.ts`, `tests/basic/shimOleStorage.test.ts`, `tests/basic/vmCore.test.ts`, `tests/basic/shimFile.test.ts`, `tests/basic/shimWindowZOrder.test.ts`, and `tests/basic/shimScrollbarOcclusion.test.ts`. These do not replace the real RA2/YR save/load regressions:
 
 ```bash

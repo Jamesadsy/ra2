@@ -629,6 +629,7 @@ export class WorkerVmClient implements VmShell {
         reportNativeRuntimeMetrics({
           event: 'audio-stream',
           bufferId: trace.id,
+          producerCursorUncached: Number(trace.producerCursorUncached),
           bufferBytes: trace.size,
           formatTag: trace.format.wFormatTag,
           channels: trace.format.nChannels,

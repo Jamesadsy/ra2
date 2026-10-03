@@ -140,6 +140,10 @@ final class RuntimeLifecycleTests: XCTestCase {
             "y": 29.25,
             "privateOwnerBytes": "MZ-retail-data-must-not-be-written",
         ])
+        diagnostics.recordWebMetrics([
+            "producerCursorUncached": 1,
+            "privateOwnerBytes": "MZ-retail-data-must-not-be-written",
+        ])
 
         let debugDirectory = user.appendingPathComponent("Debug", isDirectory: true)
         let touchDirectory = user.appendingPathComponent("touchlog", isDirectory: true)
@@ -151,6 +155,7 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(summary.contains("owner/game.exe  HTTP 206"))
         XCTAssertTrue(summary.contains("owner/maps02.mix  HTTP 206"))
         XCTAssertTrue(debug.contains("unhandledrejection"))
+        XCTAssertTrue(debug.contains("producerCursorUncached=1"))
         XCTAssertTrue(touch.contains("pointerdown"))
         for value in [summary, debug, touch] {
             XCTAssertFalse(value.contains(token))

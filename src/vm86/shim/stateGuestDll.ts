@@ -139,6 +139,14 @@ export function withShimGuestDll<TBase extends Constructor<ShimFilesChain>>(Base
       return [...this.loadedGuestDlls.values()].find((module) => module.base === handle >>> 0);
     }
 
+    /** Validate the immediate guest caller against an already loaded module, without loading files from a probe. */
+    protected guestCallerInDll(stack: number, name: string): boolean {
+      const module = this.loadedGuestDlls.get(normalizeGuestPath(name));
+      if (!module || !stack) return false;
+      const caller = this.readU32(stack);
+      return caller >= module.base && caller - module.base < module.size;
+    }
+
     /**
      * Initialize bundled DLLs before the main EXE entry and replace its static IAT with actual exports. Function-pointer arguments such as BinkSetSoundSystem -> BinkOpenDirectSound must not retain hypercall stubs.
      */
