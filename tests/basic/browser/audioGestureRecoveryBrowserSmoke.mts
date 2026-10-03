@@ -146,7 +146,22 @@ try {
       undefined,
       { timeout: 10_000 },
     );
-    await page.waitForTimeout(300);
+    // Graph creation is not evidence that the audio thread has rendered or delivered its first
+    // position report. Wait for that report instead of racing a fixed delay on a busy test host.
+    await page.waitForFunction(
+      ({ position, total, contextTime }) => {
+        const test = window.__ra2AudioTest;
+        const snapshot = test.snapshot();
+        const delta = (snapshot.buffers[0].positionFrames - position + total) % total;
+        return snapshot.liveProcessorCount === 1 && test.context.currentTime > contextTime && delta > 0;
+      },
+      {
+        position: suspended.buffers[0].positionFrames,
+        total: suspended.buffers[0].totalFrames,
+        contextTime: automatic.contextTimeSeconds,
+      },
+      { timeout: 10_000 },
+    );
     const after = await page.evaluate(() => window.__ra2AudioTest.snapshot());
     const state = await page.evaluate(() => ({
       contextTime: window.__ra2AudioTest.context.currentTime,
