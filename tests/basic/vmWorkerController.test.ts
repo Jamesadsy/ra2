@@ -200,6 +200,7 @@ function harness(
     raw?: boolean;
     captureSource?: (source: GameSource) => void;
     transferFrames?: boolean;
+    proxyAudio?: boolean;
   } = {},
 ): {
   messages: WorkerToMainMessage[];
@@ -235,7 +236,7 @@ function harness(
       return core;
     },
     fetchBytes: async () => new Uint8Array(),
-    audio: new FakeAudio(),
+    audio: options.proxyAudio ? undefined : new FakeAudio(),
   };
   return { messages, core, controller: createVmWorkerController(dependencies) };
 }
@@ -259,6 +260,46 @@ function frame(value: number): VmFrame {
 }
 
 describe('VmWorkerController request-scoped errors', () => {
+  it('reads audio-thread progress atomically and rejects retired or torn cursor generations', async () => {
+    const { controller, core } = harness({ proxyAudio: true });
+    await controller.handleMessage({ type: 'init', config: config(), requestId: 71 });
+    const audio = core.platform!.audio;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const control = new Int32Array(new SharedArrayBuffer(20));
+    control.set([2, 128, 128, 7, 1]);
+    const bind = (generation: number, value = control.buffer) =>
+      controller.handleMessage({
+        type: 'audio-reader',
+        id: 42,
+        reader: { control: value, generation, byteLength: 16384, blockAlign: 4, outputSampleRateHz: 48000 },
+      } as unknown as MainToWorkerMessage);
+    try {
+      await bind(7);
+      expect(audio.getConsumerCursor?.(42)?.positionBytes).toBe(512);
+      clock.mockReturnValue(21000);
+      // Main-thread/Worker message age cannot manufacture consumption or trigger clock fallback.
+      expect(audio.getConsumerCursor?.(42)?.positionBytes).toBe(512);
+      control.set([4, 256, 256, 7, 1]);
+      expect(audio.getConsumerCursor?.(42)?.positionBytes).toBe(1024);
+      control.set([5, 999, 256, 7, 1]); // Incomplete seqlock publication.
+      expect(audio.getConsumerCursor?.(42)?.positionBytes).toBe(1024);
+      const retired = new SharedArrayBuffer(20);
+      new Int32Array(retired).set([100, 4000, 4000, 6, 1]);
+      await bind(6, retired);
+      control.set([6, 384, 384, 7, 1]);
+      expect(audio.getConsumerCursor?.(42)?.positionBytes).toBe(1536);
+      Atomics.store(control, 4, 0);
+      // Retiring a renderer freezes the last truth until a newer reader binds.
+      expect(audio.getConsumerCursor?.(42)?.positionBytes).toBe(1536);
+      audio.stop(42);
+      expect(audio.getConsumerCursor?.(42)).toBeNull();
+      audio.releaseBuffer(42);
+      expect(audio.getConsumerCursor?.(42)).toBeNull();
+    } finally {
+      clock.mockRestore();
+      controller.dispose();
+    }
+  });
   it('routes capture actions and correlates probe errors without stopping the VM', async () => {
     const { controller, messages, core } = harness();
     await controller.handleMessage({ type: 'init', config: config(), requestId: 1 });

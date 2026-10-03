@@ -6,6 +6,7 @@
 import { DEFAULT_PCM_FORMAT, normalizePcmWaveFormat, type PcmPlayOptions, type PcmWaveFormat } from '../vm86/audio';
 import type { VmAudioLifecycleSnapshot } from './vmLifecycle';
 import type { SoundConsumerCursor } from '../vm86/win32';
+import { readAudioReader, type AudioReader } from './audioReader';
 export { DEFAULT_PCM_FORMAT, normalizePcmWaveFormat, parsePcmWaveFormatEx } from '../vm86/audio';
 export type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 
@@ -51,6 +52,8 @@ export interface PcmBufferSnapshot {
 }
 
 export interface WebAudioPcmSinkOptions {
+  /** Share only renderer cursor metadata with the guest Worker, once per renderer generation. */
+  onStreamReader?: (id: PcmBufferId, reader: AudioReader) => void;
   /** Supports tests or output into an existing AudioContext. */
   contextFactory?: () => AudioContext;
   /** Connect to context.destination by default. */
@@ -63,6 +66,7 @@ export interface WebAudioPcmSinkOptions {
 }
 
 interface PcmBufferState {
+  id: PcmBufferId;
   format: PcmWaveFormat;
   pcm: Uint8Array;
   decoded: AudioBuffer | null;
@@ -71,6 +75,8 @@ interface PcmBufferState {
   stream: ScriptProcessorNode | null;
   /** Preferred live-stream path: AudioWorklet rendering on the audio thread. */
   worklet: AudioWorkletNode | null;
+  reader: AudioReader | null;
+  readerSample: SoundConsumerCursor | null;
   streamFrame: number;
   /** Remember live DirectSound ring playback so resume does not degrade it to a stale one-shot snapshot. */
   lifecycleWasLiveStreamed: boolean;
@@ -121,6 +127,7 @@ export const DEFAULT_MASTER_VOLUME = 0.25;
 export const DEFAULT_VOLUME_PERCENT = Math.round(Math.sqrt(DEFAULT_MASTER_VOLUME) * 100);
 
 export class WebAudioPcmSink {
+  private nextReaderGeneration = 1;
   private readonly buffers = new Map<PcmBufferId, PcmBufferState>();
   private readonly workletQuiesceResolvers = new WeakMap<AudioWorkletNode, () => void>();
   private readonly workletDestroyResolvers = new WeakMap<AudioWorkletNode, () => void>();
@@ -182,9 +189,13 @@ export class WebAudioPcmSink {
     byteLength: number;
     blockAlign: number;
     frequency: number;
+    readerGeneration?: number;
+    readerSequence?: number;
+    readerAuthoritative?: boolean;
   } | null {
     const state = this.buffers.get(id);
     if (!state) return null;
+    const reader = state.reader ? this.getConsumerCursor(id as number) : null;
     return {
       cursor: this.currentPosition(state),
       ageMs:
@@ -197,10 +208,18 @@ export class WebAudioPcmSink {
       byteLength: state.pcm.byteLength,
       blockAlign: state.format.nBlockAlign,
       frequency: state.frequency,
+      readerGeneration: reader?.generation,
+      readerSequence: reader?.sequence,
+      readerAuthoritative: reader?.authoritative,
     };
   }
 
   getConsumerCursor(id: number): SoundConsumerCursor | null {
+    const state = this.buffers.get(id);
+    if (state?.reader) {
+      state.readerSample = readAudioReader(state.reader, state.readerSample);
+      return state.readerSample;
+    }
     const sample = this.getStreamCursorTrace(id);
     if (!sample?.sampleRate) return null;
     return {
@@ -224,6 +243,7 @@ export class WebAudioPcmSink {
     const normalized = normalizePcmWaveFormat(format);
     const size = clamp(Math.trunc(byteLength), 0, 64 * 1024 * 1024);
     this.buffers.set(id, {
+      id,
       format: normalized,
       pcm: new Uint8Array(size),
       decoded: null,
@@ -231,6 +251,8 @@ export class WebAudioPcmSink {
       stream: null,
       worklet: null,
       streamFrame: 0,
+      reader: null,
+      readerSample: null,
       lifecycleWasLiveStreamed: false,
       lastWriteAt: null,
       writeCount: 0,
@@ -886,6 +908,22 @@ export class WebAudioPcmSink {
     worklet.connect(gain).connect(panner).connect(this.masterDestination(context));
     worklet.port.onmessage = (event) => this.onWorkletMessage(state, worklet, event.data);
     const frame = bytePositionToFrame(current, state);
+    const reader: AudioReader | null =
+      globalThis.crossOriginIsolated === true && typeof SharedArrayBuffer !== 'undefined'
+        ? {
+            control: new SharedArrayBuffer(20),
+            generation: this.nextReaderGeneration++,
+            byteLength: state.pcm.byteLength,
+            blockAlign: state.format.nBlockAlign,
+            outputSampleRateHz: context.sampleRate,
+          }
+        : null;
+    if (reader) {
+      new Int32Array(reader.control).set([0, frame, 0, reader.generation, 1]);
+      state.reader = reader;
+      state.readerSample = readAudioReader(reader, null);
+      this.options.onStreamReader?.(state.id, reader);
+    }
     worklet.port.postMessage({
       kind: 'create',
       channels: state.format.nChannels,
@@ -893,6 +931,8 @@ export class WebAudioPcmSink {
       frequency: state.frequency,
       loop: state.loop,
       frame,
+      readerControl: reader?.control,
+      readerGeneration: reader?.generation,
     });
     // Initial full synchronization: convert the existing mirror to interleaved Float32 and send it to the worklet once.
     this.postWorkletUpdate(state, worklet, 0, state.pcm);
@@ -1154,6 +1194,10 @@ export class WebAudioPcmSink {
   }
 
   private currentPosition(state: PcmBufferState): number {
+    if (state.reader) {
+      state.readerSample = readAudioReader(state.reader, state.readerSample);
+      return state.readerSample?.positionBytes ?? state.positionBytes;
+    }
     if (state.stream || state.worklet) {
       const totalFrames = Math.floor(state.pcm.byteLength / state.format.nBlockAlign);
       if (totalFrames <= 0) return 0;
@@ -1186,6 +1230,9 @@ export class WebAudioPcmSink {
     const panner = state.panner;
     if (!source && !stream && !worklet) return;
     if (updatePosition) state.positionBytes = this.currentPosition(state);
+    if (state.reader) Atomics.store(new Int32Array(state.reader.control), 4, 0);
+    state.reader = null;
+    state.readerSample = null;
     state.source = null;
     state.stream = null;
     state.worklet = null;

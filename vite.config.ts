@@ -208,10 +208,18 @@ export default defineConfig({
     hmr: false,
     // Disable caching in development to prevent stale modules during hot updates/hard reloads (previously mixed old and new map.ts code).
     // The /game resource middleware sets its own max-age=86400 and is unaffected.
-    headers: { 'Cache-Control': 'no-store' },
+    headers: {
+      'Cache-Control': 'no-store',
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
     fs: { allow: ['.'] },
   },
-  preview: { port: 4174, strictPort: true },
+  preview: {
+    port: 4174,
+    strictPort: true,
+    headers: { 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp' },
+  },
   build: { target: 'es2022' },
   worker: {
     // vmClient.ts starts a module Worker with new Worker(new URL('./vmWorker.ts', import.meta.url), { type: 'module' }).

@@ -386,7 +386,8 @@ final class RuntimeDiagnosticsLog {
                     "workerPlayCursor", "returnedWriteCursor", "candidateSafeWriteCursor", "cacheHits", "hostRefreshes", "maxCacheAgeMs",
                     "lockFlags", "requestedOffset", "requestedBytes", "resolvedOrigin", "firstOffset", "firstBytes", "secondOffset",
                     "secondBytes", "unsafeOverlap", "unlockBytes", "repeatedRegionCount", "consumerCursor", "consumerCursorAgeMs",
-                    "consumerContextTime", "workerToMainAgeMs", "webEventReceivedAtMs", "webTransitionCompletedAtMs",
+                    "consumerContextTime", "workerToMainAgeMs", "audioReaderGeneration", "audioReaderSequence", "audioReaderAuthoritative",
+                    "webEventReceivedAtMs", "webTransitionCompletedAtMs",
                     "audioTrustedEventTimestampMs", "audioTrustedResumeCallTimestampMs", "audioTrustedResumeResultTimestampMs",
                     "audioGraphRebuildResult", "audioGraphRebuildTimestampMs", "postRecoveryProbeMs",
                     "postRecoveryContextDeltaSeconds", "postRecoveryCursorDeltaFrames"]

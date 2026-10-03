@@ -292,7 +292,8 @@ final class LocalAssetServer {
         let status = range == nil ? 200 : 206
         let length = range.map { $0.upperBound - $0.lowerBound } ?? size
         let start = range?.lowerBound ?? 0
-        var extra = "Accept-Ranges: bytes\r\n"
+        // Shared audio-reader metadata requires isolation; all app resources stay on this private origin.
+        var extra = "Cross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nAccept-Ranges: bytes\r\n"
         if let range { extra += "Content-Range: bytes \(range.lowerBound)-\(range.upperBound - 1)/\(size)\r\n" }
         let cache = ownerData ? "private, no-store" : "no-cache"
         let header = "HTTP/1.1 \(status) \(status == 200 ? "OK" : "Partial Content")\r\nContent-Type: \(Self.mimeType(for: url))\r\nContent-Length: \(length)\r\n\(extra)Cache-Control: \(cache)\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"

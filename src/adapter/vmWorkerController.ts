@@ -20,6 +20,7 @@ import type { GuestMemRecordResult } from './memRecord';
 import type { VmPointerState } from './vmShell';
 import type { VmLifecycleSnapshot } from './vmLifecycle';
 import type { SoundConsumerCursor, SoundStreamingTrace } from '../vm86/win32';
+import { readAudioReader, type AudioReader } from './audioReader';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 import type { VmFrame } from '../vm86/win32';
@@ -64,8 +65,16 @@ interface WorkerScope {
 }
 
 class ProxyAudioSink implements VmAudioSink {
+  private readonly readers = new Map<number, { reader: AudioReader; last: SoundConsumerCursor | null }>();
   private readonly consumerSamples = new Map<number, Extract<MainToWorkerMessage, { type: 'audio-cursor' }>>();
   constructor(private readonly post: VmWorkerControllerDependencies['postMessage']) {}
+
+  bindReader(id: number, reader: AudioReader): void {
+    const previous = this.readers.get(id);
+    if (previous && reader.generation <= previous.reader.generation) return;
+    this.consumerSamples.delete(id);
+    this.readers.set(id, { reader, last: null });
+  }
 
   updateConsumerCursor(sample: Extract<MainToWorkerMessage, { type: 'audio-cursor' }>): void {
     const previous = this.consumerSamples.get(sample.id);
@@ -76,6 +85,11 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   getConsumerCursor(id: number): SoundConsumerCursor | null {
+    const bound = this.readers.get(id);
+    if (bound) {
+      bound.last = readAudioReader(bound.reader, bound.last);
+      return bound.last;
+    }
     const sample = this.consumerSamples.get(id);
     if (!sample || !sample.byteLength || !sample.blockAlign) return null;
     const ageMs = Math.max(0, Date.now() - sample.observedAtEpochMs);
@@ -91,6 +105,8 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   createBuffer(id: number, byteLength: number, format: PcmWaveFormat): void {
+    this.readers.delete(id);
+    this.consumerSamples.delete(id);
     this.post({ type: 'audio', op: { op: 'createBuffer', id, byteLength, format } });
   }
 
@@ -100,6 +116,8 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   setFormat(id: number, format: PcmWaveFormat): boolean {
+    this.readers.delete(id);
+    this.consumerSamples.delete(id);
     this.post({ type: 'audio', op: { op: 'setFormat', id, format } });
     return true;
   }
@@ -116,6 +134,8 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   stop(id: number): boolean {
+    this.readers.delete(id);
+    this.consumerSamples.delete(id);
     this.post({ type: 'audio', op: { op: 'stop', id } });
     return true;
   }
@@ -149,6 +169,7 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   releaseBuffer(id: number): boolean {
+    this.readers.delete(id);
     this.consumerSamples.delete(id);
     this.post({ type: 'audio', op: { op: 'releaseBuffer', id } });
     return true;
@@ -163,6 +184,8 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   async destroy(): Promise<void> {
+    this.readers.clear();
+    this.consumerSamples.clear();
     this.post({ type: 'audio-control', action: 'destroy' });
   }
 }
@@ -245,6 +268,9 @@ export class VmWorkerController {
   async handleMessage(message: MainToWorkerMessage): Promise<void> {
     try {
       switch (message.type) {
+        case 'audio-reader':
+          this.audioProxy?.bindReader(message.id, message.reader);
+          break;
         case 'audio-cursor':
           this.audioProxy?.updateConsumerCursor(message);
           break;

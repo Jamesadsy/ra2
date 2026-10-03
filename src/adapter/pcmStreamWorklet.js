@@ -27,6 +27,10 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
     /** @type {{ channels: number, frames: number, pcm: Float32Array, frame: number,
      *   playing: boolean, loop: boolean, step: number, lastPositionAt: number } | null} */
     this.state = null;
+    /** @type {Int32Array | null} Five metadata words, independent of PCM/guest memory. */
+    this.readerControl = null;
+    this.readerGeneration = 0;
+    this.consumedOutputFrames = 0;
     /**
      * Set by destroy. process() must then return false: while it returns true the node keeps "active processing"
      * status, so the browser cannot collect a disconnected node and its per-quantum work accumulates on the audio
@@ -38,11 +42,15 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
 
   /**
    * @param {{ kind: string, channels?: number, frames?: number, frequency?: number,
-   *   loop?: boolean, frame?: number, offsetFrames?: number, data?: Float32Array }} message
+   *   loop?: boolean, frame?: number, offsetFrames?: number, data?: Float32Array,
+   *   readerControl?: SharedArrayBuffer, readerGeneration?: number }} message
    */
   onMessage(message) {
     switch (message.kind) {
       case 'create': {
+        this.readerControl = message.readerControl ? new Int32Array(message.readerControl) : null;
+        this.readerGeneration = message.readerGeneration ?? 0;
+        this.consumedOutputFrames = 0;
         const channels = Math.max(1, message.channels);
         const frames = Math.max(0, message.frames);
         this.state = {
@@ -55,6 +63,7 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
           step: Math.max(0, message.frequency) / sampleRate,
           lastPositionAt: currentTime,
         };
+        this.publishReader();
         break;
       }
       case 'update': {
@@ -87,6 +96,7 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
       }
       case 'set-position': {
         if (this.state) this.state.frame = message.frame;
+        this.publishReader();
         break;
       }
       case 'set-frequency': {
@@ -97,10 +107,26 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
         this.state = null;
         if (!this.destroyed) liveProcessors--; // A repeated destroy must not double-count.
         this.destroyed = true;
+        this.publishReader();
         this.port.postMessage({ kind: 'destroyed', live: liveProcessors });
         break;
       }
     }
+  }
+
+  /** Publish only after sampling: readers never infer consumption from clocks or message delivery. */
+  publishReader() {
+    const words = this.readerControl;
+    if (!words) return;
+    const state = this.state;
+    const frame = state ? Math.floor(state.loop ? state.frame % state.frames : state.frame) : 0;
+    Atomics.add(words, 0, 1);
+    Atomics.store(words, 1, frame);
+    Atomics.store(words, 2, this.consumedOutputFrames);
+    Atomics.store(words, 3, this.readerGeneration);
+    // The owner can retire this reader while a quantum is running. Never revive it afterward.
+    if (this.destroyed) Atomics.store(words, 4, 0);
+    Atomics.add(words, 0, 1);
   }
 
   process(_inputs, outputs) {
@@ -138,6 +164,8 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
       frame += state.step;
     }
     state.frame = frame;
+    this.consumedOutputFrames = (this.consumedOutputFrames + length) >>> 0;
+    this.publishReader();
 
     // Report the cursor about every 100ms as the main thread's extrapolation baseline.
     if (currentTime - state.lastPositionAt >= 0.1) {

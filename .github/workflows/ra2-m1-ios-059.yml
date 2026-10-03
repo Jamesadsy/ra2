@@ -12,6 +12,7 @@ on:
       - secondsun/ra2-m1-ios-069-tap-start-handoff
       - secondsun/ra2-m1-ios-070-save-audio-recovery
       - secondsun/ra2-m1-ios-073-streamed-cursor-cache-bypass
+      - secondsun/ra2-m1-ios-074-sol-high-cameo-audio-recovery
   workflow_dispatch:
 
 permissions:
@@ -97,6 +98,7 @@ jobs:
           fi
           pnpm run test:browser:touch-ui
           pnpm run test:browser:audio
+          pnpm exec tsx tests/basic/browser/audioReaderBrowserSmoke.mts
           pnpm run test:browser:audio-gesture
           RA2_BROWSER_FRESH_CONTEXT=1 pnpm run test:browser:audio-gesture
           pnpm run test:browser:cold-save

@@ -10,6 +10,7 @@ import type { GameResolution } from '../games/resolution';
 import type { Ra2NetworkConfig } from '../games/ra2/networkTransport';
 import type { VmLifecycleAction, VmLifecycleSnapshot } from './vmLifecycle';
 import type { VmMoviePlaybackState } from '../contracts/moviePlayback';
+import type { AudioReader } from './audioReader';
 
 /** Main-thread/Worker message protocol. Array fields (PCM/frames/EXE) transfer ownership; a single FIFO channel preserves order. */
 
@@ -57,6 +58,7 @@ export interface VmInitConfig {
 }
 
 export type MainToWorkerMessage =
+  | { type: 'audio-reader'; id: number; reader: AudioReader }
   | { type: 'diagnostics'; action: VmDiagnosticAction; requestId: number }
   | { type: 'game-performance'; requestId: number }
   | { type: 'attach-maps'; files: GameFileEntry[]; requestId: number }

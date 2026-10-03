@@ -108,6 +108,11 @@ export class WorkerVmClient implements VmShell {
     this.audio =
       options.audio ??
       new WebAudioPcmSink({
+        onStreamReader: (id, reader) => {
+          if (typeof id === 'number' && this.lifecycleState === 'active') {
+            this.worker.postMessage({ type: 'audio-reader', id, reader });
+          }
+        },
         onError: (error) => {
           console.warn('[VM audio]', error);
           reportNativeRuntimeError('audio', error);
@@ -607,7 +612,7 @@ export class WorkerVmClient implements VmShell {
         const trace = op.trace;
         const consumer = this.audio.getStreamCursorTrace(trace.id);
         const workerToMainAgeMs = Math.max(0, Date.now() - trace.observedAtMs);
-        if (consumer?.sampleRate && this.lifecycleState === 'active') {
+        if (consumer?.sampleRate && !consumer.readerAuthoritative && this.lifecycleState === 'active') {
           this.worker.postMessage({
             type: 'audio-cursor',
             id: trace.id,
@@ -652,6 +657,9 @@ export class WorkerVmClient implements VmShell {
           consumerCursorAgeMs: consumer?.ageMs ?? undefined,
           consumerContextTime: consumer?.contextTime ?? undefined,
           workerToMainAgeMs,
+          audioReaderGeneration: consumer?.readerGeneration,
+          audioReaderSequence: consumer?.readerSequence,
+          audioReaderAuthoritative: Number(consumer?.readerAuthoritative ?? false),
         });
         break;
       }

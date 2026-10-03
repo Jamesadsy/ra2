@@ -5,7 +5,7 @@ import XCTest
 
 @MainActor
 final class LocalWebKitContractTests: XCTestCase {
-    func testLoopbackRuntimeHasDurableBrowserStorageAcrossHostLifecycle() async throws {
+    func testLoopbackRuntimeHasSharedAudioReaderAndDurableBrowserStorageAcrossHostLifecycle() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let webRoot = root.appendingPathComponent("Web", isDirectory: true)
@@ -14,6 +14,12 @@ final class LocalWebKitContractTests: XCTestCase {
         try FileManager.default.createDirectory(at: ownerDataRoot, withIntermediateDirectories: true)
         try Data("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>ready".utf8)
             .write(to: webRoot.appendingPathComponent("index.html"))
+        let hostBundle = try XCTUnwrap(Bundle(identifier: "org.second-sun.ra2m1"))
+        let packagedAssets = try XCTUnwrap(hostBundle.resourceURL).appendingPathComponent("Web/assets", isDirectory: true)
+        let readerAsset = try XCTUnwrap(FileManager.default.contentsOfDirectory(atPath: packagedAssets.path)
+            .first(where: { $0.hasPrefix("pcmStreamWorklet-") && $0.hasSuffix(".js") }))
+        try FileManager.default.copyItem(at: packagedAssets.appendingPathComponent(readerAsset),
+                                        to: webRoot.appendingPathComponent("reader.js"))
 
         let server = LocalAssetServer(webRoot: webRoot, ownerDataRoot: ownerDataRoot, port: LocalAssetServer.productionPort + 1)
         let ready = expectation(description: "loopback listener ready")
@@ -26,7 +32,9 @@ final class LocalWebKitContractTests: XCTestCase {
         if let startupError { throw startupError }
         defer { server.stop() }
 
-        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let configuration = WKWebViewConfiguration()
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         let navigation = NavigationWaiter()
         webView.navigationDelegate = navigation
         let navigationFinished = expectation(description: "loopback navigation completed")
@@ -44,6 +52,46 @@ final class LocalWebKitContractTests: XCTestCase {
         let indexedDBAvailable = try await webView.evaluateJavaScript("typeof indexedDB !== 'undefined'") as? Bool
         XCTAssertEqual(secureContext, true, "The app-owned loopback origin must support secure browser features.")
         XCTAssertEqual(indexedDBAvailable, true, "Route B save/config storage requires IndexedDB.")
+        let sharedAudioAvailable = try await webView.evaluateJavaScript(
+            "crossOriginIsolated && typeof SharedArrayBuffer === 'function' && typeof AudioWorkletNode === 'function'"
+        ) as? Bool
+        XCTAssertEqual(sharedAudioAvailable, true, "074 requires shared Worklet/Worker reader truth on the actual loopback WKWebView.")
+        guard sharedAudioAvailable == true else { return }
+        _ = try await webView.evaluateJavaScript("""
+          (() => {
+            window.__ra2AudioReaderProof = 'pending';
+            (async () => {
+              const context = new AudioContext();
+              const control = new SharedArrayBuffer(20);
+              new Int32Array(control).set([0, 0, 0, 7, 1]);
+              const workerURL = URL.createObjectURL(new Blob([
+                "onmessage = e => { const words = new Int32Array(e.data); const timer = setInterval(() => { if(Atomics.load(words, 2) > 0) { postMessage(Array.from(words)); clearInterval(timer); } }, 10); };"
+              ], {type: 'text/javascript'}));
+              const worker = new Worker(workerURL);
+              try {
+                await context.audioWorklet.addModule('/reader.js');
+                const node = new AudioWorkletNode(context, 'ra2-pcm-stream', {outputChannelCount: [1]});
+                node.connect(context.destination);
+                const observed = new Promise(resolve => { worker.onmessage = event => resolve(event.data); });
+                worker.postMessage(control);
+                node.port.postMessage({kind: 'create', channels: 1, frames: 4096, frequency: context.sampleRate,
+                                       loop: true, frame: 0, readerControl: control, readerGeneration: 7});
+                await context.resume();
+                const words = await observed;
+                window.__ra2AudioReaderProof = words[2] > 0 && words[3] === 7 && words[4] === 1 ? 'shared' : 'failed';
+                node.port.postMessage({kind: 'destroy'});
+                node.disconnect();
+              } catch (error) {
+                window.__ra2AudioReaderProof = 'error:' + String(error);
+              } finally {
+                worker.terminate(); URL.revokeObjectURL(workerURL); await context.close();
+              }
+            })();
+            return 'started';
+          })()
+          """)
+        let audioProof = try await waitForString("window.__ra2AudioReaderProof", in: webView)
+        XCTAssertEqual(audioProof, "shared", "The packaged Worklet must publish into the same block seen by a real WKWebView Worker.")
 
         let storeName = "ra2-m1-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         let writeStarted = try await webView.evaluateJavaScript("""

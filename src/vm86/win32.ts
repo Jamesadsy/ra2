@@ -259,6 +259,10 @@ export interface SoundConsumerCursor {
   outputSampleRateHz: number;
   transportLatencyMs: number;
   ageMs: number;
+  /** Synchronous renderer-owned state; never extrapolate or expire into a playback-clock estimate. */
+  authoritative?: boolean;
+  generation?: number;
+  sequence?: number;
 }
 
 export interface SoundStreamingTrace {

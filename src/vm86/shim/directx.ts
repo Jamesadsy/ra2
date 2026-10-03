@@ -839,7 +839,8 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
               const streamTrace = this.streamTraces.get(buffer.object);
               if (streamTrace) {
                 const now = this.audioNow();
-                const cacheBypassActive = SOUND_POSITION_STREAM_BYPASS && streamTrace.fromWriteCursorObserved;
+                const cacheBypassActive =
+                  cursors.authoritative || (SOUND_POSITION_STREAM_BYPASS && streamTrace.fromWriteCursorObserved);
                 if (streamTrace.refreshedAt > 0 && !cacheBypassActive) {
                   streamTrace.trace.maxCacheAgeMs = Math.max(
                     streamTrace.trace.maxCacheAgeMs,
@@ -858,7 +859,7 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
               }
               if (a[1]) this.writeU32(a[1], position);
               if (a[2]) this.writeU32(a[2], cursors.write);
-              this.cacheSoundBufferPosition(buffer, cursors.play, cursors.write);
+              this.cacheSoundBufferPosition(buffer, cursors.play, cursors.write, cursors.authoritative);
             }
             return { eax: 0 };
           case 'GetFormat':
@@ -1152,13 +1153,18 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
       return buffer;
     }
 
-    private cacheSoundBufferPosition(buffer: SoundBufferState, play: number, write: number): void {
+    private cacheSoundBufferPosition(
+      buffer: SoundBufferState,
+      play: number,
+      write: number,
+      authoritative = false,
+    ): void {
       this.writeU32(buffer.object + SOUND_POSITION_CACHE, play >>> 0);
       this.writeU32(buffer.object + SOUND_WRITE_POSITION_CACHE, write >>> 0);
       const streamed = this.streamTraces.get(buffer.object)?.fromWriteCursorObserved;
       this.writeU32(
         buffer.object + SOUND_POSITION_BUDGET,
-        SOUND_POSITION_STREAM_BYPASS && streamed ? 0 : SOUND_POSITION_FAST_BUDGET,
+        authoritative || (SOUND_POSITION_STREAM_BYPASS && streamed) ? 0 : SOUND_POSITION_FAST_BUDGET,
       );
     }
 
@@ -1168,9 +1174,14 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
       this.writeU32(buffer.object + SOUND_POSITION_BUDGET, 0);
     }
 
-    private soundBufferCursors(buffer: SoundBufferState): { play: number; write: number; candidate: number } {
-      const model = this.soundBufferPosition(buffer);
+    private soundBufferCursors(buffer: SoundBufferState): {
+      play: number;
+      write: number;
+      candidate: number;
+      authoritative: boolean;
+    } {
       const consumer = this.options.audio?.getConsumerCursor?.(buffer.object);
+      const model = consumer?.authoritative ? buffer.position : this.soundBufferPosition(buffer);
       const host = this.options.audio?.getState(buffer.object)?.positionBytes;
       const align = Math.max(1, buffer.format.nBlockAlign);
       const size = Math.floor(buffer.size / align) * align;
@@ -1185,7 +1196,12 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
       );
       const leadBytes = Math.min(Math.max(0, size - align), Math.max(1, leadFrames) * align);
       const candidate = buffer.playing && size > 0 ? (play + leadBytes) % size : play;
-      return { play, write: SOUND_CURSOR_CONTRACT_AB ? candidate : play, candidate };
+      return {
+        play,
+        write: SOUND_CURSOR_CONTRACT_AB ? candidate : play,
+        candidate,
+        authoritative: !!consumer?.authoritative,
+      };
     }
     /**
      * In the normal browser path the VM runs in a Worker while WebAudio runs on the main thread, preventing synchronous getState. Maintain DirectSound cursors from host monotonic time and PCM frame rate so RA2's streaming decoder can identify consumed ring regions and refill them promptly.
