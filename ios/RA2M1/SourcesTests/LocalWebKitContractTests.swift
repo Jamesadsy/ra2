@@ -1,57 +1,17 @@
 import Foundation
+import UIKit
 import WebKit
 import XCTest
 @testable import RA2M1
 
 @MainActor
 final class LocalWebKitContractTests: XCTestCase {
-    func testLoopbackRuntimeHasSharedAudioReaderAndDurableBrowserStorageAcrossHostLifecycle() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let webRoot = root.appendingPathComponent("Web", isDirectory: true)
-        let ownerDataRoot = root.appendingPathComponent("Documents/CnC RA2/Data", isDirectory: true)
-        try FileManager.default.createDirectory(at: webRoot, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: ownerDataRoot, withIntermediateDirectories: true)
-        try Data("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>ready".utf8)
-            .write(to: webRoot.appendingPathComponent("index.html"))
-        let hostBundle = try XCTUnwrap(Bundle(identifier: "org.second-sun.ra2m1"))
-        let packagedAssets = try XCTUnwrap(hostBundle.resourceURL).appendingPathComponent("Web/assets", isDirectory: true)
-        let readerAsset = try XCTUnwrap(FileManager.default.contentsOfDirectory(atPath: packagedAssets.path)
-            .first(where: { $0.hasPrefix("pcmStreamWorklet-") && $0.hasSuffix(".js") }))
-        try FileManager.default.copyItem(at: packagedAssets.appendingPathComponent(readerAsset),
-                                        to: webRoot.appendingPathComponent("reader.js"))
-
-        let server = LocalAssetServer(webRoot: webRoot, ownerDataRoot: ownerDataRoot, port: LocalAssetServer.productionPort + 1)
-        let ready = expectation(description: "loopback listener ready")
-        var startupError: Error?
-        server.start { result in
-            if case .failure(let error) = result { startupError = error }
-            ready.fulfill()
-        }
-        await fulfillment(of: [ready], timeout: 10)
-        if let startupError { throw startupError }
-        defer { server.stop() }
-
-        let configuration = WKWebViewConfiguration()
-        configuration.mediaTypesRequiringUserActionForPlayback = []
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        let navigation = NavigationWaiter()
-        webView.navigationDelegate = navigation
-        let navigationFinished = expectation(description: "loopback navigation completed")
-        var navigationError: Error?
-        navigation.didFinish = { navigationFinished.fulfill() }
-        navigation.didFail = { error in
-            navigationError = error
-            navigationFinished.fulfill()
-        }
-        webView.load(URLRequest(url: server.origin))
-        await fulfillment(of: [navigationFinished], timeout: 20)
-        if let navigationError { throw navigationError }
-
+    func testVisibleLoopbackRuntimePublishesSharedAudioReaderToWorker() async throws {
+        let host = try await makeProofHost(portOffset: 1, copyWorklet: true)
+        defer { host.close() }
+        let webView = host.webView
         let secureContext = try await webView.evaluateJavaScript("window.isSecureContext") as? Bool
-        let indexedDBAvailable = try await webView.evaluateJavaScript("typeof indexedDB !== 'undefined'") as? Bool
         XCTAssertEqual(secureContext, true, "The app-owned loopback origin must support secure browser features.")
-        XCTAssertEqual(indexedDBAvailable, true, "Route B save/config storage requires IndexedDB.")
         let sharedAudioAvailable = try await webView.evaluateJavaScript(
             "crossOriginIsolated && typeof SharedArrayBuffer === 'function' && typeof AudioWorkletNode === 'function'"
         ) as? Bool
@@ -60,89 +20,219 @@ final class LocalWebKitContractTests: XCTestCase {
         _ = try await webView.evaluateJavaScript("""
           (() => {
             window.__ra2AudioReaderProof = 'pending';
+            const proof = {phase: 'context-create', visibility: document.visibilityState,
+                           moduleLoaded: false, nodeCreated: false, workerReceived: false,
+                           workerShared: false, errors: []};
+            let context, control, worker, workerURL, node;
+            const fail = (phase, error) => {
+              proof.errors.push({phase, name: String(error?.name || 'Error'), message: String(error?.message || error).slice(0, 160)});
+              window.__ra2AudioReaderProof = 'error';
+            };
+            window.__ra2AudioReaderSnapshot = () => JSON.stringify({...proof,
+              visibility: document.visibilityState, contextState: context?.state,
+              currentTime: context?.currentTime, words: control ? Array.from(new Int32Array(control)) : []});
+            window.__ra2AudioReaderCleanup = () => {
+              node?.port.postMessage({kind: 'destroy'}); node?.disconnect();
+              worker?.terminate(); if(workerURL) URL.revokeObjectURL(workerURL);
+              if(context) context.close().catch(error => fail('close', error));
+            };
             (async () => {
-              const context = new AudioContext();
-              const control = new SharedArrayBuffer(20);
-              new Int32Array(control).set([0, 0, 0, 7, 1]);
-              const workerURL = URL.createObjectURL(new Blob([
-                "onmessage = e => { const words = new Int32Array(e.data); const timer = setInterval(() => { if(Atomics.load(words, 2) > 0) { postMessage(Array.from(words)); clearInterval(timer); } }, 10); };"
-              ], {type: 'text/javascript'}));
-              const worker = new Worker(workerURL);
               try {
-                await context.audioWorklet.addModule('/reader.js');
-                const node = new AudioWorkletNode(context, 'ra2-pcm-stream', {outputChannelCount: [1]});
+                context = new AudioContext();
+                proof.beforeResume = {state: context.state, time: context.currentTime};
+                control = new SharedArrayBuffer(20);
+                new Int32Array(control).set([0, 0, 0, 7, 1]);
+                workerURL = URL.createObjectURL(new Blob([
+                  "onmessage = e => { const words = new Int32Array(e.data); postMessage({kind: 'received', shared: e.data instanceof SharedArrayBuffer, words: Array.from(words)}); const timer = setInterval(() => { if(Atomics.load(words, 2) > 0) { postMessage({kind: 'progress', words: Array.from(words)}); clearInterval(timer); } }, 10); };"
+                ], {type: 'text/javascript'}));
+                worker = new Worker(workerURL);
+                worker.onerror = event => fail('worker', {name: 'WorkerError', message: event.message});
+                worker.onmessageerror = () => fail('worker-message', {name: 'DataCloneError', message: 'Worker message could not be decoded'});
+                const observed = new Promise(resolve => {
+                  worker.onmessage = event => {
+                    if(event.data.kind === 'received') {
+                      proof.workerReceived = true; proof.workerShared = event.data.shared;
+                      proof.receivedWords = event.data.words;
+                    } else if(event.data.kind === 'progress') resolve(event.data.words);
+                  };
+                });
+                proof.phase = 'module-load';
+                await context.audioWorklet.addModule('/reader.js'); proof.moduleLoaded = true;
+                proof.phase = 'node-create';
+                node = new AudioWorkletNode(context, 'ra2-pcm-stream', {outputChannelCount: [1]});
+                proof.nodeCreated = true; node.onprocessorerror = () => fail('processor', {name: 'ProcessorError', message: 'Worklet processor failed'});
                 node.connect(context.destination);
-                const observed = new Promise(resolve => { worker.onmessage = event => resolve(event.data); });
                 worker.postMessage(control);
                 node.port.postMessage({kind: 'create', channels: 1, frames: 4096, frequency: context.sampleRate,
                                        loop: true, frame: 0, readerControl: control, readerGeneration: 7});
-                await context.resume();
-                const words = await observed;
-                window.__ra2AudioReaderProof = words[2] > 0 && words[3] === 7 && words[4] === 1 ? 'shared' : 'failed';
-                node.port.postMessage({kind: 'destroy'});
-                node.disconnect();
-              } catch (error) {
-                window.__ra2AudioReaderProof = 'error:' + String(error);
-              } finally {
-                worker.terminate(); URL.revokeObjectURL(workerURL); await context.close();
-              }
+                proof.phase = 'resume'; await context.resume();
+                proof.afterResume = {state: context.state, time: context.currentTime};
+                proof.phase = 'shared-progress'; proof.observedWords = await observed;
+                await new Promise(resolve => setTimeout(resolve, 100));
+                proof.afterProgress = {state: context.state, time: context.currentTime};
+                if(proof.errors.length === 0) window.__ra2AudioReaderProof = 'shared';
+                proof.phase = 'complete';
+              } catch (error) { fail(proof.phase, error); }
             })();
             return 'started';
           })()
           """)
-        let audioProof = try await waitForString("window.__ra2AudioReaderProof", in: webView)
-        XCTAssertEqual(audioProof, "shared", "The packaged Worklet must publish into the same block seen by a real WKWebView Worker.")
+        let outcome = try await waitForString("window.__ra2AudioReaderProof", in: webView)
+        let snapshot = try await webView.evaluateJavaScript("window.__ra2AudioReaderSnapshot()") as? String
+        print("WO-SS-SOL-080 audio \(snapshot ?? "missing")")
+        _ = try await webView.evaluateJavaScript("window.__ra2AudioReaderCleanup(); 'closed'")
+        XCTAssertEqual(outcome, "shared", "The packaged Worklet must publish into the same block seen by a real WKWebView Worker. \(snapshot ?? "missing")")
+        let bytes = try XCTUnwrap(snapshot?.data(using: .utf8))
+        let proof = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(proof["visibility"] as? String, "visible")
+        XCTAssertEqual(proof["moduleLoaded"] as? Bool, true)
+        XCTAssertEqual(proof["nodeCreated"] as? Bool, true)
+        XCTAssertEqual(proof["workerReceived"] as? Bool, true)
+        XCTAssertEqual(proof["workerShared"] as? Bool, true)
+        XCTAssertEqual(proof["contextState"] as? String, "running")
+        let before = try XCTUnwrap(proof["beforeResume"] as? [String: Any])
+        XCTAssertGreaterThan(try XCTUnwrap(proof["currentTime"] as? Double), try XCTUnwrap(before["time"] as? Double))
+        let words = try XCTUnwrap(proof["words"] as? [Int])
+        XCTAssertEqual(words.count, 5)
+        guard words.count == 5 else { return }
+        XCTAssertGreaterThan(words[0], 0)
+        XCTAssertGreaterThan(words[2], 0)
+        XCTAssertEqual(words[3], 7)
+        XCTAssertEqual(words[4], 1)
+        XCTAssertEqual((proof["errors"] as? [[String: Any]])?.count, 0)
+    }
 
+    func testVisibleLoopbackStorageCommitsBeforeAndRetainsAcrossHostLifecycle() async throws {
+        // Independent page, origin and database: an audio timeout cannot cause storage assertions.
+        let host = try await makeProofHost(portOffset: 4, copyWorklet: false)
+        defer { host.close() }
+        let webView = host.webView
+        let secureContext = try await webView.evaluateJavaScript("window.isSecureContext") as? Bool
+        let indexedDBAvailable = try await webView.evaluateJavaScript("typeof indexedDB !== 'undefined'") as? Bool
+        XCTAssertEqual(secureContext, true)
+        XCTAssertEqual(indexedDBAvailable, true, "Route B save/config storage requires IndexedDB.")
         let storeName = "ra2-m1-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         let writeStarted = try await webView.evaluateJavaScript("""
           (() => {
             window.__ra2M1StorageWrite = 'pending';
-            const request = indexedDB.open('\(storeName)', 1);
-            request.onupgradeneeded = () => request.result.createObjectStore('state');
-            request.onerror = () => { window.__ra2M1StorageWrite = 'error'; };
-            request.onsuccess = () => {
-              const database = request.result;
-              const transaction = database.transaction('state', 'readwrite');
-              transaction.objectStore('state').put('persisted', 'save-boundary');
-              transaction.oncomplete = () => {
-                window.__ra2M1StorageWrite = 'written';
-                database.close();
-              };
-              transaction.onerror = () => { window.__ra2M1StorageWrite = 'error'; };
+            const proof = window.__ra2StorageDiagnostics = {phase: 'open', visibility: document.visibilityState, errors: []};
+            const fail = window.__ra2StorageFail = (phase, error) => {
+              proof.errors.push({phase, name: String(error?.name || 'Error'), message: String(error?.message || error).slice(0, 160)});
+              window.__ra2M1StorageWrite = 'error'; window.__ra2M1StorageRead = 'error';
             };
+            try {
+              const request = indexedDB.open('\(storeName)', 1);
+              request.onblocked = () => fail('open-blocked', {name: 'BlockedError', message: 'Database open was blocked'});
+              request.onerror = () => fail('open', request.error);
+              request.onupgradeneeded = () => request.result.createObjectStore('state');
+              request.onsuccess = () => {
+                const database = request.result;
+                try {
+                  proof.phase = 'write-transaction';
+                  const transaction = database.transaction('state', 'readwrite');
+                  const put = transaction.objectStore('state').put('persisted', 'save-boundary');
+                  put.onerror = () => fail('put-request', put.error);
+                  transaction.oncomplete = () => {
+                    proof.phase = 'committed'; window.__ra2M1StorageWrite = 'written'; database.close();
+                  };
+                  transaction.onerror = () => fail('write-transaction', transaction.error);
+                  transaction.onabort = () => { fail('write-abort', transaction.error); database.close(); };
+                } catch(error) { database.close(); fail('write-setup', error); }
+              };
+            } catch(error) { fail('open-setup', error); }
             return 'started';
           })()
           """) as? String
         XCTAssertEqual(writeStarted, "started")
         let wrote = try await waitForString("window.__ra2M1StorageWrite", in: webView)
+        try await reportStorage(webView, phase: "write")
         XCTAssertEqual(wrote, "written")
+        guard wrote == "written" else { return }
+        try await startStorageRead(storeName, in: webView)
+        let cleanRead = try await waitForString("window.__ra2M1StorageRead", in: webView)
+        try await reportStorage(webView, phase: "before-lifecycle")
+        XCTAssertEqual(cleanRead, "persisted", "A clean attached WKWebView must commit and read before any synthetic lifecycle event.")
+        guard cleanRead == "persisted" else { return }
 
-        let diagnostics = RuntimeDiagnosticsLog(userURL: FileManager.default.temporaryDirectory)
+        let diagnostics = RuntimeDiagnosticsLog(userURL: host.root)
         let lifecycle = RuntimeLifecycleCoordinator(webView: webView, diagnostics: diagnostics)
         lifecycle.applicationDidEnterBackground()
         lifecycle.applicationWillEnterForeground()
-        let readStarted = try await webView.evaluateJavaScript("""
+        try await startStorageRead(storeName, in: webView)
+        let retained = try await waitForString("window.__ra2M1StorageRead", in: webView)
+        try await reportStorage(webView, phase: "after-lifecycle")
+        XCTAssertEqual(retained, "persisted")
+        XCTAssertTrue(lifecycle.webView === webView)
+        _ = try await webView.evaluateJavaScript("indexedDB.deleteDatabase('\(storeName)'); 'closed'")
+    }
+
+    private func startStorageRead(_ storeName: String, in webView: WKWebView) async throws {
+        let started = try await webView.evaluateJavaScript("""
           (() => {
             window.__ra2M1StorageRead = 'pending';
-            const request = indexedDB.open('\(storeName)', 1);
-            request.onerror = () => { window.__ra2M1StorageRead = 'error'; };
-            request.onsuccess = () => {
-              const database = request.result;
-              const transaction = database.transaction('state', 'readonly');
-              const value = transaction.objectStore('state').get('save-boundary');
-              value.onsuccess = () => {
-                window.__ra2M1StorageRead = typeof value.result === 'string' ? value.result : 'missing';
-                database.close();
+            const proof = window.__ra2StorageDiagnostics;
+            const fail = window.__ra2StorageFail;
+            proof.phase = 'read-open';
+            try {
+              const request = indexedDB.open('\(storeName)', 1);
+              request.onerror = () => fail('read-open', request.error);
+              request.onblocked = () => fail('read-blocked', {name: 'BlockedError', message: 'Database read was blocked'});
+              request.onsuccess = () => {
+                const database = request.result;
+                try {
+                  const transaction = database.transaction('state', 'readonly');
+                  const value = transaction.objectStore('state').get('save-boundary');
+                  let result = 'missing';
+                  value.onsuccess = () => { result = typeof value.result === 'string' ? value.result : 'missing'; };
+                  value.onerror = () => fail('read-request', value.error);
+                  transaction.oncomplete = () => {
+                    proof.phase = 'read-complete'; window.__ra2M1StorageRead = result; database.close();
+                  };
+                  transaction.onerror = () => fail('read-transaction', transaction.error);
+                  transaction.onabort = () => { fail('read-abort', transaction.error); database.close(); };
+                } catch(error) { database.close(); fail('read-setup', error); }
               };
-              value.onerror = () => { window.__ra2M1StorageRead = 'error'; };
-            };
+            } catch(error) { fail('read-open-setup', error); }
             return 'started';
           })()
           """) as? String
-        XCTAssertEqual(readStarted, "started")
-        let retained = try await waitForString("window.__ra2M1StorageRead", in: webView)
-        XCTAssertEqual(retained, "persisted")
-        XCTAssertTrue(lifecycle.webView === webView)
+        XCTAssertEqual(started, "started")
+    }
+
+    private func reportStorage(_ webView: WKWebView, phase: String) async throws {
+        let snapshot = try await webView.evaluateJavaScript("JSON.stringify({...window.__ra2StorageDiagnostics, visibility: document.visibilityState})") as? String
+        print("WO-SS-SOL-080 storage \(phase) \(snapshot ?? "missing")")
+    }
+
+    private func makeProofHost(portOffset: UInt16, copyWorklet: Bool) async throws -> WebKitProofHost {
+        let host = try WebKitProofHost(portOffset: portOffset, copyWorklet: copyWorklet)
+        let ready = expectation(description: "independent loopback listener ready")
+        var startupError: Error?
+        host.server.start { result in
+            if case .failure(let error) = result { startupError = error }
+            ready.fulfill()
+        }
+        await fulfillment(of: [ready], timeout: 10)
+        if let startupError { host.close(); throw startupError }
+        let loaded = expectation(description: "independent loopback navigation completed")
+        var navigationError: Error?
+        host.navigation.didFinish = { loaded.fulfill() }
+        host.navigation.didFail = { error in navigationError = error; loaded.fulfill() }
+        host.webView.navigationDelegate = host.navigation
+        host.webView.load(URLRequest(url: host.server.origin))
+        await fulfillment(of: [loaded], timeout: 20)
+        if let navigationError { host.close(); throw navigationError }
+        print("WO-SS-SOL-080 native window=\(host.webView.window != nil) key=\(host.window.isKeyWindow) bounds=\(host.webView.bounds) windowHidden=\(host.window.isHidden) viewHidden=\(host.webView.isHidden) appState=\(UIApplication.shared.applicationState.rawValue)")
+        XCTAssertTrue(host.webView.window === host.window)
+        XCTAssertNotNil(host.webView.superview)
+        XCTAssertFalse(host.window.isHidden)
+        XCTAssertFalse(host.webView.isHidden)
+        XCTAssertGreaterThan(host.webView.bounds.width, 0)
+        XCTAssertGreaterThan(host.webView.bounds.height, 0)
+        let visibility = try await waitForString("document.visibilityState === 'visible' ? 'visible' : 'pending'", in: host.webView)
+        print("WO-SS-SOL-080 document visibility=\(visibility ?? "timeout")")
+        XCTAssertEqual(visibility, "visible", "Real rendering and storage require a qualified visible test host.")
+        return host
     }
 
     func testPackagedHostBridgeAcknowledgesBootstrapAndForwardsJavascriptFailures() async throws {
@@ -351,6 +441,59 @@ final class LocalWebKitContractTests: XCTestCase {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         return nil
+    }
+}
+
+@MainActor
+private final class WebKitProofHost {
+    let root: URL
+    let server: LocalAssetServer
+    let webView: WKWebView
+    let navigation = NavigationWaiter()
+    let window: UIWindow
+    private let previousWindow: UIWindow?
+
+    init(portOffset: UInt16, copyWorklet: Bool) throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let webRoot = root.appendingPathComponent("Web", isDirectory: true)
+        let ownerRoot = root.appendingPathComponent("Data", isDirectory: true)
+        try FileManager.default.createDirectory(at: webRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ownerRoot, withIntermediateDirectories: true)
+        try Data("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>ready".utf8)
+            .write(to: webRoot.appendingPathComponent("index.html"))
+        if copyWorklet {
+            let hostBundle = try XCTUnwrap(Bundle(identifier: "org.second-sun.ra2m1"))
+            let assets = try XCTUnwrap(hostBundle.resourceURL).appendingPathComponent("Web/assets", isDirectory: true)
+            let reader = try XCTUnwrap(FileManager.default.contentsOfDirectory(atPath: assets.path)
+                .first(where: { $0.hasPrefix("pcmStreamWorklet-") && $0.hasSuffix(".js") }))
+            try FileManager.default.copyItem(at: assets.appendingPathComponent(reader), to: webRoot.appendingPathComponent("reader.js"))
+        }
+        server = LocalAssetServer(webRoot: webRoot, ownerDataRoot: ownerRoot, port: LocalAssetServer.productionPort + portOffset)
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        let bounds = UIScreen.main.bounds
+        webView = WKWebView(frame: CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height), configuration: configuration)
+        previousWindow = (UIApplication.shared.delegate as? AppDelegate)?.window
+        window = UIWindow(frame: bounds)
+        let controller = UIViewController()
+        controller.view = UIView(frame: bounds)
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        controller.view.addSubview(webView)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.view.layoutIfNeeded()
+    }
+
+    func close() {
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.removeFromSuperview()
+        window.isHidden = true
+        window.rootViewController = nil
+        previousWindow?.makeKeyAndVisible()
+        server.stop()
+        try? FileManager.default.removeItem(at: root)
     }
 }
 

@@ -82,6 +82,8 @@ The RA2 reference-fixup assertion at `0x69fcbd` reports missing or inconsistent 
 
 ## Asset-free browser tests
 
+The iOS WebKit contract suite uses retained visible windows and non-zero attached web views for real AudioWorklet and IndexedDB proofs. Audio and storage have independent pages and fixtures. The audio proof requires visible-document, running-clock, module/node, Worker shared-buffer receipt and consumed-progress evidence from the packaged Worklet. Storage must commit and read before the existing lifecycle retention check. Bounded diagnostics expose operation stages and JavaScript error names/messages, never PCM, owner bytes or capability tokens. API availability alone is not a rendering or storage pass.
+
 ```bash
 pnpm run test:browser:install
 pnpm run dev
