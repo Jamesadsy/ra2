@@ -73,7 +73,7 @@ it('first and second media completion retire buffers and resume actual guest sim
       const release = api('IDirectSoundBuffer.Release', 4, 'DSOUND.COM');
       const input = api('GetAsyncKeyState', 4, 'USER32.DLL');
       const flip = api('IDirectDrawSurface.Flip', 12, 'DDRAW.COM');
-    const invoke = (target: number, args: number[]) => [...args.slice().reverse().flatMap(push32), ...call32(target)];
+      const invoke = (target: number, args: number[]) => [...args.slice().reverse().flatMap(push32), ...call32(target)];
       const code: number[] = [];
       for (const { id, simulation } of buffers) {
         code.push(...invoke(stop, [id]), ...invoke(position, [id, 0]));
