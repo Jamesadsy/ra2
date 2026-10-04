@@ -369,7 +369,7 @@ final class RuntimeDiagnosticsLog {
                     "audioFrequencyHz", "audioChannels", "audioBitsPerSample", "audioBlockAlign", "audioFormatCount",
                     "audioSourceStartCount", "audioStreamStartCount", "audioWorkletStartCount", "audioDynamicStreamWrites", "audioDynamicStreamWriteRateHz",
                     "audioBufferCreateCount", "audioBufferDuplicateCount", "audioBufferCursorFrames", "audioBufferTotalFrames",
-                    "audioContextIdentity", "audioContextCreationCount", "audioFreshContextRecoveryCount", "audioRetiredContextCount", "audioRetiredContextCloseFailures", "audioLifecycleRecoveryPending", "audioSuspendCallAttempted",
+                    "audioContextIdentity", "audioContextCreationCount", "audioFreshContextRecoveryCount", "audioRetiredContextCount", "audioRetiredContextCloseFailures", "audioLifecycleRecoveryPending", "audioRecoveryGeneration", "audioRendererProgressProven", "audioSuspendCallAttempted",
                     "audioSuspendSucceeded", "audioAutomaticResumeAttempted", "audioAutomaticResumeResult",
                     "audioTrustedGestureAttemptCount", "audioTrustedGestureResumeResult", "audioTrustedInteractionTrusted",
                     "audioLiveStreamedBuffers", "audioWorkletModuleLoaded",

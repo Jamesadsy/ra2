@@ -615,6 +615,7 @@ export class WorkerVmClient implements VmShell {
         if (consumer?.sampleRate && !consumer.readerAuthoritative && this.lifecycleState === 'active') {
           this.worker.postMessage({
             type: 'audio-cursor',
+            ownershipGeneration: consumer.ownershipGeneration,
             id: trace.id,
             positionBytes: consumer.cursor,
             playing: consumer.playing,
@@ -665,22 +666,22 @@ export class WorkerVmClient implements VmShell {
         break;
       }
       case 'createBuffer':
-        this.audio.createBuffer(op.id, op.byteLength, op.format);
+        this.audio.createBuffer(op.id, op.byteLength, op.format, op.ownershipGeneration);
         break;
       case 'duplicateBuffer':
-        this.audio.duplicateBuffer(op.sourceId, op.destinationId);
+        this.audio.duplicateBuffer(op.sourceId, op.destinationId, op.ownershipGeneration);
         break;
       case 'setFormat':
-        this.audio.setFormat(op.id, op.format);
+        this.audio.setFormat(op.id, op.format, op.ownershipGeneration);
         break;
       case 'writeBuffer':
         this.audio.writeBuffer(op.id, op.offset, op.bytes);
         break;
       case 'play':
-        this.audio.play(op.id, op.options);
+        this.audio.play(op.id, op.options, op.ownershipGeneration);
         break;
       case 'stop':
-        this.audio.stop(op.id);
+        this.audio.stop(op.id, op.ownershipGeneration);
         break;
       case 'setCurrentPosition':
         this.audio.setCurrentPosition(op.id, op.byteOffset);

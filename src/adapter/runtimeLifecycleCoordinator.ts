@@ -28,6 +28,8 @@ export function installRuntimeLifecycleCoordinator(
   let backgroundFramePipeline: VmLifecycleFramePipeline | null = null;
   let backgroundPresentedFrames = 0;
   let transitionQueue = Promise.resolve();
+  let signalPhase: 'foreground' | 'background' = 'foreground';
+  let generation = 0;
   const postRecoveryTimers = new Set<number>();
 
   const report = (
@@ -97,6 +99,8 @@ export function installRuntimeLifecycleCoordinator(
       audioRetiredContextCount: audio?.retiredContextCount,
       audioRetiredContextCloseFailures: audio?.retiredContextCloseFailures,
       audioLifecycleRecoveryPending: audio ? Number(audio.lifecycleRecoveryPending) : undefined,
+      audioRecoveryGeneration: audio?.recoveryGeneration,
+      audioRendererProgressProven: audio ? Number(audio.rendererProgressProven ?? false) : undefined,
       audioSuspendCallAttempted: audio ? Number(audio.suspendCallAttempted) : undefined,
       audioSuspendSucceeded:
         audio?.suspendSucceeded === null || audio?.suspendSucceeded === undefined
@@ -193,12 +197,14 @@ export function installRuntimeLifecycleCoordinator(
   };
 
   const scheduleRecoveryProbes = (label: string, timestamp: number, baseline: VmAudioLifecycleSnapshot) => {
+    const ownerGeneration = generation;
     for (const delay of [250, 1_000]) {
       const timer = window.setTimeout(() => {
         postRecoveryTimers.delete(timer);
-        if (disposed || appPhase !== 'foreground') return;
+        if (disposed || appPhase !== 'foreground' || ownerGeneration !== generation) return;
         const started = performance.now();
         void vm.lifecycle('probe').then((result) => {
+          if (disposed || signalPhase !== 'foreground' || ownerGeneration !== generation) return;
           const current = result.audio.buffers.find((item) => item.playing);
           const previous = baseline.buffers.find((item) => item.playing && item.ordinal === current?.ordinal);
           report(
@@ -242,7 +248,7 @@ export function installRuntimeLifecycleCoordinator(
     showRecovery(reason);
   };
 
-  const handleNativeLifecycle = async (phase: unknown, timestampValue: unknown) => {
+  const handleNativeLifecycle = async (phase: unknown, timestampValue: unknown, ownerGeneration: number) => {
     if (disposed || (phase !== 'background' && phase !== 'foreground')) return;
     const timestamp =
       typeof timestampValue === 'number' && Number.isFinite(timestampValue) ? timestampValue : Date.now();
@@ -294,10 +300,13 @@ export function installRuntimeLifecycleCoordinator(
     }
 
     if (appPhase === 'foreground') return;
+    const owned = () => !disposed && generation === ownerGeneration && signalPhase === 'foreground';
+    if (!owned()) return;
     appPhase = 'foreground';
     firstInteractionPending = true;
     try {
       const beforeResume = await vm.lifecycle('probe');
+      if (!owned()) return;
       report(
         'before-foreground-resume',
         timestamp,
@@ -311,6 +320,7 @@ export function installRuntimeLifecycleCoordinator(
         return;
       }
       const resumed = await vm.lifecycle('resume');
+      if (!owned()) return;
       report(
         'after-foreground-resume',
         timestamp,
@@ -324,13 +334,24 @@ export function installRuntimeLifecycleCoordinator(
         failClosed(resumed.worker.recoveryReason ?? 'runtime-not-safe-to-resume', timestamp);
       }
     } catch {
+      if (!owned()) return;
       failClosed('worker-unresponsive-after-foreground', timestamp);
     }
   };
 
   const onNativeLifecycle = (event: Event) => {
     const detail = (event as NativeLifecycleEvent).detail;
-    const next = transitionQueue.then(() => handleNativeLifecycle(detail?.phase, detail?.nativeTimestampMs));
+    if (detail?.phase === 'background' || detail?.phase === 'foreground') {
+      if (signalPhase !== detail.phase) {
+        signalPhase = detail.phase;
+        generation++;
+      }
+      if (detail.phase === 'background') firstInteractionPending = false;
+    }
+    const ownerGeneration = generation;
+    const next = transitionQueue.then(() =>
+      handleNativeLifecycle(detail?.phase, detail?.nativeTimestampMs, ownerGeneration),
+    );
     transitionQueue = next.catch(() => undefined);
   };
 
@@ -355,6 +376,7 @@ export function installRuntimeLifecycleCoordinator(
       return;
     }
     firstInteractionPending = false;
+    const ownerGeneration = generation;
     const timestamp = Date.now();
     reportNativeRuntimeMetrics({
       event: 'lifecycle',
@@ -365,11 +387,13 @@ export function installRuntimeLifecycleCoordinator(
     });
     void vm.lifecycle('audio-unlock', event).then(
       (result) => {
+        if (disposed || generation !== ownerGeneration || signalPhase !== 'foreground') return;
         report('audio-unlocked-by-user', timestamp, result.worker, result.audio, {}, result.framePipeline);
         scheduleRecoveryProbes('trusted', timestamp, result.audio);
         if (result.audio.unlockResult === false) failClosed('audio-resume-failed-after-user-interaction', timestamp);
       },
       () => {
+        if (disposed || generation !== ownerGeneration || signalPhase !== 'foreground') return;
         reportNativeRuntimeMetrics({
           event: 'lifecycle',
           lifecyclePhase: 'audio-unlock-failed',

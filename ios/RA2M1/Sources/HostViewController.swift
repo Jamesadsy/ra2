@@ -418,6 +418,18 @@ final class HostViewController: UIViewController, WKNavigationDelegate, WKScript
 
     private func observeApplicationLifecycle() {
         let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.diagnostics.recordNativeMetrics("audio lifecycle notification=willResignActive")
+                self?.lifecycle?.applicationWillResignActive()
+            }
+        })
+        observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.diagnostics.recordNativeMetrics("audio lifecycle notification=didBecomeActive")
+                self?.lifecycle?.applicationDidBecomeActive()
+            }
+        })
         observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             let notificationMs = Date().timeIntervalSince1970 * 1_000
             Task { @MainActor in

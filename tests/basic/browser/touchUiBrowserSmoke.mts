@@ -164,11 +164,17 @@ try {
           const buttons = [...document.querySelectorAll<HTMLElement>('#vm-touch-controls > .touch-key')].map(
             (button) => {
               const box = button.getBoundingClientRect();
+              const label = document.createRange();
+              label.selectNodeContents(button);
+              const text = label.getBoundingClientRect();
+              const style = getComputedStyle(button);
               return {
                 role: button.dataset.role ?? button.dataset.code,
                 width: box.width,
                 height: box.height,
                 visible: getComputedStyle(button).display !== 'none',
+                labelFits:
+                  text.width <= button.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
               };
             },
           );
@@ -208,6 +214,7 @@ try {
         expect(geometry.canvas.right).toBeLessThanOrEqual(geometry.rail.x);
         expect(geometry.rail.width).toBeLessThanOrEqual(52);
         expect(geometry.rail.height).toBeLessThanOrEqual(200);
+        expect(geometry.buttons.find((button) => button.role === 'Space')?.labelFits).toBe(true);
         expect(geometry.rail.right).toBeLessThanOrEqual(viewport.width - safeSide + 0.5);
         expect(Math.abs(geometry.rail.y + geometry.rail.height / 2 - viewport.height / 2)).toBeLessThanOrEqual(1);
         expect(geometry.buttons.map((button) => button.role)).toEqual(['collapse', 'Escape', 'Enter', 'Space']);

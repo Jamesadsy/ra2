@@ -45,6 +45,8 @@ export interface VmAudioLifecycleSnapshot {
   retiredContextCount?: number;
   retiredContextCloseFailures?: number;
   lifecycleRecoveryPending: boolean;
+  recoveryGeneration?: number;
+  rendererProgressProven?: boolean;
   suspendCallAttempted: boolean;
   suspendSucceeded: boolean | null;
   automaticResumeAttempted: boolean;

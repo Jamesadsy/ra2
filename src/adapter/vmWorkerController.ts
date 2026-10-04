@@ -64,12 +64,22 @@ interface WorkerScope {
   onmessage: ((event: MessageEvent<MainToWorkerMessage>) => void) | null;
 }
 
-class ProxyAudioSink implements VmAudioSink {
+export class ProxyAudioSink implements VmAudioSink {
+  private nextOwnershipGeneration = 1;
+  private readonly ownership = new Map<number, number>();
+  private renewOwnership(id: number): number {
+    const generation = this.nextOwnershipGeneration++;
+    this.ownership.set(id, generation);
+    this.readers.delete(id);
+    this.consumerSamples.delete(id);
+    return generation;
+  }
   private readonly readers = new Map<number, { reader: AudioReader; last: SoundConsumerCursor | null }>();
   private readonly consumerSamples = new Map<number, Extract<MainToWorkerMessage, { type: 'audio-cursor' }>>();
   constructor(private readonly post: VmWorkerControllerDependencies['postMessage']) {}
 
   bindReader(id: number, reader: AudioReader): void {
+    if ((reader.ownershipGeneration ?? 0) !== (this.ownership.get(id) ?? 0)) return;
     const previous = this.readers.get(id);
     if (previous && reader.generation <= previous.reader.generation) return;
     this.consumerSamples.delete(id);
@@ -77,6 +87,7 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   updateConsumerCursor(sample: Extract<MainToWorkerMessage, { type: 'audio-cursor' }>): void {
+    if ((sample.ownershipGeneration ?? 0) !== (this.ownership.get(sample.id) ?? 0)) return;
     const previous = this.consumerSamples.get(sample.id);
     this.consumerSamples.set(sample.id, {
       ...sample,
@@ -105,20 +116,19 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   createBuffer(id: number, byteLength: number, format: PcmWaveFormat): void {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
-    this.post({ type: 'audio', op: { op: 'createBuffer', id, byteLength, format } });
+    const ownershipGeneration = this.renewOwnership(id);
+    this.post({ type: 'audio', op: { op: 'createBuffer', id, byteLength, format, ownershipGeneration } });
   }
 
   duplicateBuffer(sourceId: number, destinationId: number): boolean {
-    this.post({ type: 'audio', op: { op: 'duplicateBuffer', sourceId, destinationId } });
+    const ownershipGeneration = this.renewOwnership(destinationId);
+    this.post({ type: 'audio', op: { op: 'duplicateBuffer', sourceId, destinationId, ownershipGeneration } });
     return true;
   }
 
   setFormat(id: number, format: PcmWaveFormat): boolean {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
-    this.post({ type: 'audio', op: { op: 'setFormat', id, format } });
+    const ownershipGeneration = this.renewOwnership(id);
+    this.post({ type: 'audio', op: { op: 'setFormat', id, format, ownershipGeneration } });
     return true;
   }
 
@@ -129,14 +139,13 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   play(id: number, options: PcmPlayOptions = {}): boolean {
-    this.post({ type: 'audio', op: { op: 'play', id, options } });
+    this.post({ type: 'audio', op: { op: 'play', id, options, ownershipGeneration: this.ownership.get(id) } });
     return true;
   }
 
   stop(id: number): boolean {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
-    this.post({ type: 'audio', op: { op: 'stop', id } });
+    const ownershipGeneration = this.renewOwnership(id);
+    this.post({ type: 'audio', op: { op: 'stop', id, ownershipGeneration } });
     return true;
   }
 
@@ -169,8 +178,9 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   releaseBuffer(id: number): boolean {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
+    this.renewOwnership(id);
+    // Absence rejects old nonzero lifetimes; no tombstone is needed for a released address.
+    this.ownership.delete(id);
     this.post({ type: 'audio', op: { op: 'releaseBuffer', id } });
     return true;
   }
@@ -180,12 +190,14 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   stopAll(): void {
+    for (const id of this.ownership.keys()) this.renewOwnership(id);
     this.post({ type: 'audio-control', action: 'stop-all' });
   }
 
   async destroy(): Promise<void> {
     this.readers.clear();
     this.consumerSamples.clear();
+    this.ownership.clear();
     this.post({ type: 'audio-control', action: 'destroy' });
   }
 }

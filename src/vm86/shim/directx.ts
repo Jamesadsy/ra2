@@ -1191,9 +1191,11 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
       candidate: number;
       authoritative: boolean;
     } {
-      const consumer = this.options.audio?.getConsumerCursor?.(buffer.object);
+      // Stop/SetCurrentPosition owns the cursor at completion. A renderer packet still in transit
+      // must not overwrite the guest's stopped/reset position while native media cleanup drains.
+      const consumer = buffer.playing ? this.options.audio?.getConsumerCursor?.(buffer.object) : null;
       const model = consumer?.authoritative ? buffer.position : this.soundBufferPosition(buffer);
-      const host = this.options.audio?.getState(buffer.object)?.positionBytes;
+      const host = buffer.playing ? this.options.audio?.getState(buffer.object)?.positionBytes : null;
       const align = Math.max(1, buffer.format.nBlockAlign);
       const size = Math.floor(buffer.size / align) * align;
       const rawPlay = SOUND_CURSOR_CONTRACT_AB ? (consumer?.positionBytes ?? host ?? model) : (host ?? model);

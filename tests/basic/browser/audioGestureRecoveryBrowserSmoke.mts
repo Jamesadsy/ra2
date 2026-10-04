@@ -115,7 +115,9 @@ try {
     assert.equal(automatic.automaticResumeAttempted, true);
     assert.equal(automatic.automaticResumeResult, false, 'the deterministic policy denies non-gesture resume');
     assert.equal(automatic.lifecycleRecoveryPending, true);
-    assert.equal(automatic.contextState, freshContextPolicy || cycleIndex === 2 ? 'running' : 'suspended');
+    assert.equal(automatic.contextState, cycleIndex === 2 ? 'running' : 'suspended');
+    assert.equal(automatic.contextCreationCount, before.contextCreationCount);
+    assert.equal(automatic.sourceCount + automatic.workletCount + automatic.streamCount, 0);
     const framesWhileAway = await page.evaluate(() => window.__ra2AudioTest.guestFrames);
 
     if (cycleIndex === 0) {
@@ -174,6 +176,7 @@ try {
       delete window.__ra2AudioTest.context.state;
     });
     assert.equal(after.trustedInteractionTrusted, true);
+    assert.equal(after.rendererProgressProven, true);
     assert.equal(
       after.trustedGestureAttemptCount,
       cycles.length + 2,

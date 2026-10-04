@@ -4,6 +4,8 @@ import type { SoundConsumerCursor } from '../vm86/win32';
 export interface AudioReader {
   control: SharedArrayBuffer;
   generation: number;
+  /** Worker-owned buffer/playback lifetime; rejects packets crossing Stop/Release/address reuse. */
+  ownershipGeneration?: number;
   byteLength: number;
   blockAlign: number;
   outputSampleRateHz: number;
