@@ -57,6 +57,32 @@ describe('canvas 等比适配', () => {
     expect(result!.cssWidth / result!.cssHeight).toBeCloseTo(4 / 3, 3);
   });
 
+  it('在三个横向手机安全视口中填满高度并如实保留 4:3 侧边留白', () => {
+    const cases = [
+      { viewportWidth: 568, viewportHeight: 320, safeSide: 24, expectedWidth: 426.667 },
+      { viewportWidth: 844, viewportHeight: 390, safeSide: 44, expectedWidth: 520 },
+      { viewportWidth: 932, viewportHeight: 430, safeSide: 59, expectedWidth: 573.333 },
+    ];
+
+    for (const { viewportWidth, viewportHeight, safeSide, expectedWidth } of cases) {
+      const stageWidth = viewportWidth - safeSide * 2;
+      const result = calculateCanvasFit({
+        stageWidth,
+        stageHeight: viewportHeight,
+        frameWidth: 800,
+        frameHeight: 600,
+        devicePixelRatio: 3,
+      });
+
+      expect(result).not.toBeNull();
+      expect(result!.cssWidth).toBeCloseTo(expectedWidth, 2);
+      expect(result!.cssHeight).toBe(viewportHeight);
+      expect(result!.cssWidth / result!.cssHeight).toBeCloseTo(4 / 3, 3);
+      expect(result!.cssWidth).toBeLessThanOrEqual(stageWidth);
+      expect((stageWidth - result!.cssWidth) / 2).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it('在非整数缩放和高 DPR 下仍不改变帧比例', () => {
     const result = calculateCanvasFit({
       stageWidth: 1237,

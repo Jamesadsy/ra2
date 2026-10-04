@@ -2420,3 +2420,63 @@ html[data-host-platform='ios'][data-host-immersive='true'] #stage {
     z-index: 35;
   }
 }
+
+/* Short landscape touch rail: keep the shell only as large as its controls and center it inside the safe viewport. */
+@media (orientation: landscape) and (max-height: 600px) {
+  #vm-touch-controls {
+    top: var(--safe-top);
+    right: calc(var(--safe-right) + 4px);
+    bottom: var(--safe-bottom);
+    left: auto;
+    width: max-content;
+    height: max-content;
+    margin-top: auto;
+    margin-bottom: auto;
+    grid-template-columns: 44px;
+    gap: 4px;
+    padding: 2px;
+    border: 1px solid #777;
+    border-left: 2px solid var(--ra2-red-hot);
+    border-radius: 2px;
+    background: linear-gradient(180deg, #282828, #111);
+    box-shadow:
+      inset 1px 0 0 rgba(255, 255, 255, 0.08),
+      0 2px 8px rgba(0, 0, 0, 0.65);
+  }
+
+  #vm-touch-controls.collapsed {
+    background: linear-gradient(180deg, #282828, #111);
+    border-color: #777;
+    border-left-color: var(--ra2-red-hot);
+    box-shadow:
+      inset 1px 0 0 rgba(255, 255, 255, 0.08),
+      0 2px 8px rgba(0, 0, 0, 0.65);
+  }
+
+  /* Short landscape uses the floating joystick for scrolling; preserve the three game actions and collapse toggle. */
+  #vm-touch-controls .touch-dpad {
+    display: none;
+  }
+}
+
+/* The smallest supported landscape viewport has only the letterbox gutter for the rail, so remove its outer shell. */
+@media (orientation: landscape) and (max-height: 600px) and (max-width: 600px) {
+  #vm-touch-controls,
+  #vm-touch-controls.collapsed {
+    right: var(--safe-right);
+    gap: 2px;
+    padding: 0;
+    border-color: transparent;
+    border-left-width: 1px;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  #vm-touch-controls .touch-key {
+    box-sizing: border-box;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+}
