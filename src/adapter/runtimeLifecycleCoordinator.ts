@@ -15,7 +15,7 @@ interface NativeLifecycleEvent extends Event {
 export function installRuntimeLifecycleCoordinator(
   vm: VmShell,
   releaseInput: () => void,
-  showRecovery: (reason: string) => void,
+  showRecovery: (reason: string, onContinue?: () => void) => void,
   getPresentedFrameCount: () => number = () => 0,
 ): () => void {
   let appPhase: 'foreground' | 'background' = 'foreground';
@@ -227,7 +227,7 @@ export function installRuntimeLifecycleCoordinator(
     }
   };
 
-  const failClosed = (reason: string, timestamp: number) => {
+  const presentRecovery = (reason: string, timestamp: number, onContinue?: () => void) => {
     if (recoveryShown) return;
     recoveryShown = true;
     firstInteractionPending = false;
@@ -239,7 +239,22 @@ export function installRuntimeLifecycleCoordinator(
       workerResponsive: 0,
       recoveryReason: reason,
     });
-    showRecovery(reason);
+    if (onContinue) showRecovery(reason, onContinue);
+    else showRecovery(reason);
+  };
+
+  const failClosed = (reason: string, timestamp: number) => {
+    presentRecovery(reason, timestamp);
+  };
+
+  const continueAfterAudioUnlockFalse = (timestamp: number) => {
+    let continued = false;
+    const onContinue = () => {
+      if (continued) return;
+      continued = true;
+      recoveryShown = false;
+    };
+    presentRecovery('audio-resume-failed-after-user-interaction', timestamp, onContinue);
   };
 
   const handleNativeLifecycle = async (phase: unknown, timestampValue: unknown) => {
@@ -367,7 +382,20 @@ export function installRuntimeLifecycleCoordinator(
       (result) => {
         report('audio-unlocked-by-user', timestamp, result.worker, result.audio, {}, result.framePipeline);
         scheduleRecoveryProbes('trusted', timestamp, result.audio);
-        if (result.audio.unlockResult === false) failClosed('audio-resume-failed-after-user-interaction', timestamp);
+        if (
+          !result.worker.safeToResume ||
+          !result.worker.workerRunning ||
+          result.worker.phase !== 'running' ||
+          result.worker.guestClockPaused ||
+          result.worker.pendingFileReads > 0 ||
+          result.worker.pendingFileWrites > 0 ||
+          result.worker.rangePrefetchPending ||
+          result.worker.flushOk === false
+        ) {
+          failClosed(result.worker.recoveryReason ?? 'runtime-not-safe-to-resume', timestamp);
+          return;
+        }
+        if (result.audio.unlockResult === false) continueAfterAudioUnlockFalse(timestamp);
       },
       () => {
         reportNativeRuntimeMetrics({

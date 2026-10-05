@@ -68,7 +68,16 @@ function audioSnapshot(): VmAudioLifecycleSnapshot {
   };
 }
 
-function setup(resumeWorker = workerSnapshot()) {
+function setup(
+  resumeWorker = workerSnapshot(),
+  options: {
+    audioUnlock?: 'true' | 'false' | 'reject';
+    audioUnlockWorker?: VmLifecycleSnapshot;
+    pauseWorker?: VmLifecycleSnapshot;
+    pauseReject?: boolean;
+    resumeReject?: boolean;
+  } = {},
+) {
   const win = Object.assign(new EventTarget(), {
     setInterval: () => 1,
     clearInterval: vi.fn(),
@@ -94,19 +103,25 @@ function setup(resumeWorker = workerSnapshot()) {
     async lifecycle(action: string) {
       actions.push(action);
       if (action === 'pause') {
+        if (options.pauseReject) throw new Error('pause failed');
         return {
           action,
-          worker: workerSnapshot({ guestClockPaused: true, flushOk: true, lifecycleCycles: 1 }),
+          worker: options.pauseWorker ?? workerSnapshot({ guestClockPaused: true, flushOk: true, lifecycleCycles: 1 }),
           audio: { ...audioSnapshot(), contextState: 'suspended', sourceCount: 0 },
         } as VmLifecycleReport;
       }
-      if (action === 'resume') return { action, worker: resumeWorker, audio: audioSnapshot() } as VmLifecycleReport;
-      if (action === 'audio-unlock')
+      if (action === 'resume') {
+        if (options.resumeReject) throw new Error('worker failed');
+        return { action, worker: resumeWorker, audio: audioSnapshot() } as VmLifecycleReport;
+      }
+      if (action === 'audio-unlock') {
+        if (options.audioUnlock === 'reject') throw new Error('audio unlock rejected');
         return {
           action,
-          worker: workerSnapshot(),
-          audio: { ...audioSnapshot(), unlockResult: true },
+          worker: options.audioUnlockWorker ?? workerSnapshot(),
+          audio: { ...audioSnapshot(), unlockResult: options.audioUnlock === 'false' ? false : true },
         } as VmLifecycleReport;
+      }
       return { action, worker: workerSnapshot(), audio: audioSnapshot() } as VmLifecycleReport;
     },
   };
@@ -173,6 +188,165 @@ describe('RA2 lifecycle coordination', () => {
       expect(test.showRecovery).toHaveBeenCalledOnce();
       expect(test.showRecovery).toHaveBeenCalledWith('pending-read');
       expect(test.metrics.some((record) => record.lifecyclePhase === 'recovery-required')).toBe(true);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it('offers Continue only for resolved audio-unlock false and permits a later foreground cycle', async () => {
+    const test = setup(workerSnapshot(), { audioUnlock: 'false' });
+    try {
+      test.emit('background', 10_000);
+      await test.settle();
+      test.emit('foreground', 20_000);
+      await test.settle();
+      const trustedInteraction = new Event('pointerdown');
+      Object.defineProperty(trustedInteraction, 'isTrusted', { value: true });
+      test.win.dispatchEvent(trustedInteraction);
+      await test.settle();
+
+      expect(test.showRecovery).toHaveBeenCalledOnce();
+      expect(test.showRecovery).toHaveBeenCalledWith(
+        'audio-resume-failed-after-user-interaction',
+        expect.any(Function),
+      );
+      const onContinue = test.showRecovery.mock.calls[0]?.[1];
+      expect(onContinue).toBeTypeOf('function');
+      onContinue?.();
+      onContinue?.();
+
+      test.emit('background', 30_000);
+      await test.settle();
+      test.emit('foreground', 40_000);
+      await test.settle();
+      const laterInteraction = new Event('pointerdown');
+      Object.defineProperty(laterInteraction, 'isTrusted', { value: true });
+      test.win.dispatchEvent(laterInteraction);
+      await test.settle();
+
+      expect(test.actions.filter((action) => action === 'audio-unlock')).toHaveLength(2);
+      expect(test.showRecovery).toHaveBeenCalledTimes(2);
+      expect(test.showRecovery.mock.calls.every((call) => typeof call[1] === 'function')).toBe(true);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it('keeps a rejected audio-unlock promise restart-only', async () => {
+    const test = setup(workerSnapshot(), { audioUnlock: 'reject' });
+    try {
+      test.emit('background', 10_000);
+      await test.settle();
+      test.emit('foreground', 20_000);
+      await test.settle();
+      const trustedInteraction = new Event('pointerdown');
+      Object.defineProperty(trustedInteraction, 'isTrusted', { value: true });
+      test.win.dispatchEvent(trustedInteraction);
+      await test.settle();
+
+      expect(test.showRecovery).toHaveBeenCalledWith('audio-resume-failed-after-user-interaction');
+      expect(test.showRecovery.mock.calls[0]).toHaveLength(1);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it('keeps a resolved audio-unlock false with unsafe Worker state restart-only', async () => {
+    const test = setup(workerSnapshot(), {
+      audioUnlock: 'false',
+      audioUnlockWorker: workerSnapshot({
+        safeToResume: false,
+        pendingFileReads: 1,
+        recoveryReason: 'pending-read',
+      }),
+    });
+    try {
+      test.emit('background', 10_000);
+      await test.settle();
+      test.emit('foreground', 20_000);
+      await test.settle();
+      const trustedInteraction = new Event('pointerdown');
+      Object.defineProperty(trustedInteraction, 'isTrusted', { value: true });
+      test.win.dispatchEvent(trustedInteraction);
+      await test.settle();
+
+      expect(test.showRecovery).toHaveBeenCalledWith('pending-read');
+      expect(test.showRecovery.mock.calls[0]).toHaveLength(1);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it.each([
+    [
+      'pending read',
+      workerSnapshot({ safeToResume: false, pendingFileReads: 1, recoveryReason: 'pending-read' }),
+      {},
+      'pending-read',
+    ],
+    [
+      'safeToResume=false',
+      workerSnapshot({ safeToResume: false, recoveryReason: null }),
+      {},
+      'runtime-not-safe-to-resume',
+    ],
+    [
+      'flush failure',
+      workerSnapshot({ safeToResume: false, flushOk: false, recoveryReason: 'flush-failed' }),
+      {},
+      'flush-failed',
+    ],
+    ['background pause failure', workerSnapshot(), { pauseReject: true }, 'background-pause-or-flush-failed'],
+    [
+      'runtime unavailable',
+      workerSnapshot({
+        phase: 'error',
+        workerRunning: false,
+        safeToResume: false,
+        recoveryReason: 'runtime-unavailable',
+      }),
+      {},
+      'runtime-unavailable',
+    ],
+  ] as const)('%s remains restart-only', async (_name, resumeWorker, options, reason) => {
+    const test = setup(resumeWorker, options);
+    try {
+      test.emit('background', 10_000);
+      await test.settle();
+      test.emit('foreground', 20_000);
+      await test.settle();
+      expect(test.showRecovery).toHaveBeenCalledWith(reason);
+      expect(test.showRecovery.mock.calls[0]).toHaveLength(1);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it('keeps an unresponsive Worker restart-only', async () => {
+    const test = setup(workerSnapshot(), { resumeReject: true });
+    try {
+      test.emit('background', 10_000);
+      await test.settle();
+      test.emit('foreground', 20_000);
+      await test.settle();
+      expect(test.showRecovery).toHaveBeenCalledWith('worker-unresponsive-after-foreground');
+      expect(test.showRecovery.mock.calls[0]).toHaveLength(1);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it('keeps a reported flush failure restart-only', async () => {
+    const test = setup(workerSnapshot(), {
+      pauseWorker: workerSnapshot({ guestClockPaused: false, flushOk: false, recoveryReason: 'flush-failed' }),
+    });
+    try {
+      test.emit('background', 10_000);
+      await test.settle();
+      test.emit('foreground', 20_000);
+      await test.settle();
+      expect(test.showRecovery).toHaveBeenCalledWith('background-pause-or-flush-failed');
+      expect(test.showRecovery.mock.calls[0]).toHaveLength(1);
     } finally {
       test.cleanup();
     }

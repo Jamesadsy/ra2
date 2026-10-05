@@ -5,9 +5,69 @@ import { supportedGame } from '../../src/games/catalog';
 import { gameResolutionIni, withGameResolutionOverride } from '../../src/games/resolution';
 import { withMultiplayerNameOverride } from '../../src/games/multiplayerName';
 import { patchGameSpeedIni, withGameSpeedDefault } from '../../src/games/gameSpeed';
+import { readRa2GameSpeed } from '../../src/games/ra2/runtimeHooks';
+import type { GuestMemory } from '../../src/vm86/win32';
 
 const encode = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
 const decode = (b: Uint8Array) => String.fromCharCode(...b);
+
+function mappedGuestMemory(values: Map<number, number>) {
+  const reads: number[] = [];
+  const writes: number[] = [];
+  const memory: GuestMemory = {
+    read_memory(address, length) {
+      reads.push(address);
+      if (length !== 4 || !values.has(address)) throw new Error(`unexpected guest read at ${address.toString(16)}`);
+      const value = values.get(address)!;
+      return Uint8Array.of(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+    },
+    write_memory(_bytes, address) {
+      writes.push(address);
+    },
+  };
+  return { memory, reads, writes };
+}
+
+describe('RA2 runtime GameSpeed reader', () => {
+  it.each([0, 1, 2, 3, 4, 5, 6])('reads validated raw GameSpeed %i from the authorized singleton field', (speed) => {
+    const settings = 0x0012_0000;
+    const field = settings + 0x1108;
+    const { memory, reads, writes } = mappedGuestMemory(
+      new Map([
+        [0x0083_9848, settings],
+        [field, speed],
+      ]),
+    );
+    expect(readRa2GameSpeed(memory)).toBe(speed);
+    expect(reads).toEqual([0x0083_9848, field]);
+    expect(writes).toEqual([]);
+  });
+
+  it.each([0x000f_ffff, 0x1000_0000])(
+    'rejects an invalid singleton pointer %i without reading a derived address',
+    (pointer) => {
+      const { memory, reads, writes } = mappedGuestMemory(new Map([[0x0083_9848, pointer]]));
+      expect(readRa2GameSpeed(memory)).toBeNull();
+      expect(reads).toEqual([0x0083_9848]);
+      expect(writes).toEqual([]);
+    },
+  );
+
+  it('rejects an invalid old value and never touches an unapproved guest address', () => {
+    const settings = 0x0012_0000;
+    const field = settings + 0x1108;
+    const { memory, reads, writes } = mappedGuestMemory(
+      new Map([
+        [0x0083_9848, settings],
+        [field, 7],
+      ]),
+    );
+    expect(readRa2GameSpeed(memory)).toBeNull();
+    expect(reads).toEqual([0x0083_9848, field]);
+    expect(reads).not.toContain(0x0083_9848 + 0x1108);
+    expect(writes).toEqual([]);
+  });
+});
 
 describe('原版启动速度', () => {
   it('只更新单机速度，保留联机设置、编码和 CRLF，清理重复键', () => {

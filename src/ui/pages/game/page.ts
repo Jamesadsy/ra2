@@ -650,7 +650,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     activeLifecycleCleanup = installRuntimeLifecycleCoordinator(
       vm,
       () => activeInputRelease?.(),
-      (reason) => showLifecycleRecoverySurface(reason),
+      (reason, onContinue) => showLifecycleRecoverySurface(reason, onContinue),
       () => totalPresentedFrames,
     );
   }
@@ -671,7 +671,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   }
 }
 
-function showLifecycleRecoverySurface(reason: string): void {
+function showLifecycleRecoverySurface(reason: string, onContinue?: () => void): void {
+  const canContinue = typeof onContinue === 'function';
   activeInputRelease?.();
   document.getElementById('ra2-lifecycle-recovery')?.remove();
   const surface = document.createElement('div');
@@ -686,11 +687,12 @@ function showLifecycleRecoverySurface(reason: string): void {
     'box-sizing:border-box;width:min(560px,100%);padding:24px;border:1px solid #806542;background:#111619;box-shadow:0 18px 70px #000;border-radius:4px;';
   const title = document.createElement('h1');
   title.id = 'ra2-lifecycle-recovery-title';
-  title.textContent = 'CnC RA2 needs to restart';
+  title.textContent = canContinue ? 'Audio recovery could not be confirmed' : 'CnC RA2 needs to restart';
   title.style.cssText = 'margin:0 0 12px;color:#e0ad4f;font-size:20px;';
   const message = document.createElement('p');
-  message.textContent =
-    'The live game could not be resumed safely. Restarting returns to the RA2 start screen. User save and configuration data remains in the app when the last storage flush completed.';
+  message.textContent = canContinue
+    ? 'Continue returns to the live game. Restart CnC RA2 is recommended if sound or gameplay is not behaving normally.'
+    : 'The live game could not be resumed safely. Restarting returns to the RA2 start screen. User save and configuration data remains in the app when the last storage flush completed.';
   const detail = document.createElement('p');
   detail.textContent = `Recovery reason: ${reason.slice(0, 64)}`;
   detail.style.cssText = 'color:#a9a28e;font-size:12px;';
@@ -700,7 +702,26 @@ function showLifecycleRecoverySurface(reason: string): void {
   button.style.cssText =
     'min-height:44px;padding:0 18px;border:1px solid #be8242;border-radius:3px;background:#7d211d;color:#fff;font:700 14px Consolas,monospace;';
   button.addEventListener('click', () => window.location.reload(), { once: true });
-  panel.append(title, message, detail, button);
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;margin-top:20px;';
+  actions.append(button);
+  if (canContinue) {
+    const continueButton = document.createElement('button');
+    continueButton.type = 'button';
+    continueButton.textContent = 'Continue Playing / Dismiss';
+    continueButton.style.cssText =
+      'min-height:44px;padding:0 18px;border:1px solid #746c58;border-radius:3px;background:#272c2c;color:#d8d0b8;font:700 14px Consolas,monospace;';
+    continueButton.addEventListener(
+      'click',
+      () => {
+        surface.remove();
+        onContinue?.();
+      },
+      { once: true },
+    );
+    actions.append(continueButton);
+  }
+  panel.append(title, message, detail, actions);
   surface.append(panel);
   document.body.append(surface);
   button.focus();

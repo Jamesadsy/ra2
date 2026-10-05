@@ -1,7 +1,7 @@
 import type { GuestMemory } from '../../vm86/win32';
 import type { GameRuntimeHooks } from '../runtimeHooks';
 import { readF64, readU32, writeF64 } from '../shared/guestMemoryIO';
-import { writeGameSpeedFlag } from '../shared/gameSpeedFlag';
+import { readGameSpeedFlag, writeGameSpeedFlag } from '../shared/gameSpeedFlag';
 import { skipStartupMovieBlock } from '../shared/startupMovieSkip';
 import { createRa2FrameReader } from './performance';
 import { patchRa2ShortGame } from './shortGame';
@@ -16,6 +16,7 @@ const STARTUP_MOVIE_CONTINUATION = 0x0051_26f3;
 const STARTUP_MOVIE_SIGNATURE = [0xe8, 0x8f, 0x6c, 0xef, 0xff] as const;
 const RA2_SETTINGS_POINTER = 0x0083_9848;
 const RA2_GAME_SPEED_OFFSET = 0x1108;
+const RA2_MEDIA_SAFE_GAME_SPEED = 0;
 
 /** RA2 1.006 CPU benchmark loop at 0x5abf70; change sample duration and round count together. */
 const CPU_CALIBRATION_ENTRY = 0x005a_bf70;
@@ -60,6 +61,11 @@ export function shortenRa2CpuCalibration(memory: GuestMemory): boolean {
 /** Accept only the original seven settings 0..6; see RA2_SETTINGS_POINTER for the Settings singleton pointer and field offset. */
 export function writeRa2GameSpeed(memory: GuestMemory, value: number): number | null {
   return writeGameSpeedFlag(memory, RA2_SETTINGS_POINTER, RA2_GAME_SPEED_OFFSET, value);
+}
+
+/** Read only RA2 1.006's validated Settings::GameSpeed field. */
+export function readRa2GameSpeed(memory: GuestMemory): number | null {
+  return readGameSpeedFlag(memory, RA2_SETTINGS_POINTER, RA2_GAME_SPEED_OFFSET);
 }
 
 /**
@@ -107,6 +113,8 @@ export const RA2_RUNTIME_HOOKS: GameRuntimeHooks = Object.freeze({
   },
   beforeHostMessage: repairRa2InvalidRepairRate,
   writeGameSpeedFlag: writeRa2GameSpeed,
+  readGameSpeedFlag: readRa2GameSpeed,
+  mediaSafeGameSpeed: RA2_MEDIA_SAFE_GAME_SPEED,
   crashHint(vector: number, eip: number): string {
     // SwizzleManager's missing old-pointer mapping branch deliberately divides by zero.
     // Saves from the former OleSaveToStream success stub omit object data; loading them

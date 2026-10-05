@@ -125,6 +125,8 @@ export class VmCore {
   private calls = 0;
   private readonly recentCalls: string[] = [];
   private lastMoviePlaybackState = '';
+  private lastNativeBinkActive = false;
+  private mediaGameSpeedScope: { restoreValue: number; safeValue: number } | null = null;
   private lastCallStack: { key: string; stack: number; returnAddress: number } | null = null;
   private readonly pendingFileWrites = new Set<Promise<void>>();
   private pendingFileWriteError: Error | null = null;
@@ -965,10 +967,62 @@ export class VmCore {
   private publishMoviePlaybackState(): void {
     const state = this.shim?.inspectMoviePlaybackState();
     if (!state) return;
+    this.reconcileMediaGameSpeedScope(state.nativeBinkActive);
     const serialized = JSON.stringify(state);
     if (serialized === this.lastMoviePlaybackState) return;
     this.lastMoviePlaybackState = serialized;
     this.callbacks.onMoviePlaybackState?.(state);
+  }
+
+  private reconcileMediaGameSpeedScope(nativeBinkActive: boolean): void {
+    const started = nativeBinkActive && !this.lastNativeBinkActive;
+    const ended = !nativeBinkActive && this.lastNativeBinkActive;
+    this.lastNativeBinkActive = nativeBinkActive;
+
+    const hooks = this.source.game.runtimeHooks;
+    if (started) {
+      this.mediaGameSpeedScope = null;
+      const safeValue = hooks?.mediaSafeGameSpeed;
+      const readGameSpeed = hooks?.readGameSpeedFlag;
+      const writeGameSpeed = hooks?.writeGameSpeedFlag;
+      if (
+        !this.emulator ||
+        !readGameSpeed ||
+        !writeGameSpeed ||
+        !Number.isInteger(safeValue) ||
+        safeValue! < 0 ||
+        safeValue! > 6
+      )
+        return;
+
+      let restoreValue: number | null;
+      try {
+        restoreValue = readGameSpeed(this.emulator);
+      } catch {
+        return;
+      }
+      if (!Number.isInteger(restoreValue) || restoreValue! < 0 || restoreValue! > 6) return;
+
+      this.mediaGameSpeedScope = { restoreValue: restoreValue!, safeValue: safeValue! };
+      if (restoreValue !== safeValue) {
+        try {
+          writeGameSpeed(this.emulator, safeValue!);
+        } catch {
+          // Keep the validated original for the matching native close in case a failed write was partial.
+        }
+      }
+      return;
+    }
+
+    if (!ended) return;
+    const scope = this.mediaGameSpeedScope;
+    this.mediaGameSpeedScope = null;
+    if (!scope || scope.restoreValue === scope.safeValue || !this.emulator || !hooks?.writeGameSpeedFlag) return;
+    try {
+      hooks.writeGameSpeedFlag(this.emulator, scope.restoreValue);
+    } catch {
+      // A later media instance will validate and capture the then-current guest setting afresh.
+    }
   }
 
   private startPolling(): void {

@@ -14,6 +14,7 @@ on:
       - secondsun/ra2-m1-ios-073-streamed-cursor-cache-bypass
       - secondsun/ra2-m1-ios-074-sol-high-cameo-audio-recovery
       - secondsun/ra2-m1-ios-075-sol-high-bink-cameo-recovery
+      - secondsun/ra2-m1-ios-080-076-speed-safe-consolidation
   workflow_dispatch:
 
 permissions:

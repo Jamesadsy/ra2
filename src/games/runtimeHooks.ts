@@ -13,6 +13,10 @@ export interface GameRuntimeHooks {
   /** Explicit startup navigation; the game verifies the target/EXE, and the allocator exclusively owns the static-import-stub tail. */
   prepareStartupPage?(memory: GuestMemory, page: string, hash: string, reserve: (size: number) => number): void;
   writeGameSpeedFlag?(memory: GuestMemory, value: number): number | null;
+  /** Read a validated native GameSpeed value for a game-specific, temporary media safety scope. */
+  readGameSpeedFlag?(memory: GuestMemory): number | null;
+  /** Explicit native GameSpeed value to use only while this game's native special media is active. */
+  mediaSafeGameSpeed?: number;
   /** Repair confirmed vulnerable game state before host input enters the guest message queue. */
   beforeHostMessage?(memory: GuestMemory, message: number): void;
   crashHint?(vector: number, eip: number): string;
