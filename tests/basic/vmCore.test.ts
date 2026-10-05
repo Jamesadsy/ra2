@@ -151,6 +151,35 @@ function writeU32(emulator: FakeEmulator, address: number, value: number): void 
 }
 
 describe('VmCore lifecycle orchestration', () => {
+  it('reports a submitted guest frame through the existing diagnostics reply without changing its callback', async () => {
+    const emulator = new FakeEmulator();
+    const audio = new FakeAudio();
+    const shim = fakeShim();
+    const onFrame = vi.fn();
+    const frame = { width: 1, height: 1, pixels: new Uint8Array([7]), palette: new Uint8Array() };
+    let submitFrame: () => void = () => undefined;
+    const basePlatform = platform(emulator, audio, () => shim);
+    const core = new VmCore({ onFrame }, source(), {
+      ...basePlatform,
+      createShim: (_value, options) => {
+        submitFrame = () => options?.onFrame?.(frame);
+        return shim;
+      },
+    });
+    try {
+      await core.start();
+      submitFrame();
+
+      expect(onFrame).toHaveBeenCalledOnce();
+      expect(onFrame).toHaveBeenCalledWith(frame);
+      const diagnostics = await core.getDiagnostics('sample');
+      expect(diagnostics.executionProgress.guestFrameSequence).toBe(1);
+      expect(diagnostics.executionProgress.guestFrameAgeMs).not.toBeNull();
+    } finally {
+      await core.destroy();
+    }
+  });
+
   it('keeps the v86 instance running through a lifecycle pause and does not round-trip stop/run', async () => {
     const emulator = new FakeEmulator();
     const shim = Object.assign(fakeShim(), {
@@ -178,6 +207,9 @@ describe('VmCore lifecycle orchestration', () => {
       expect(emulator.is_running()).toBe(true);
       expect(emulator.stop).not.toHaveBeenCalled();
       expect(paused).toMatchObject({ workerRunning: true, lifecyclePaused: true, guestClockPaused: true });
+      const lifecycleBeforeDiagnostics = core.getLifecycleSnapshot();
+      await core.getDiagnostics('sample');
+      expect(core.getLifecycleSnapshot()).toEqual(lifecycleBeforeDiagnostics);
       const resumed = await core.resumeForLifecycle();
       expect(emulator.run).toHaveBeenCalledTimes(1);
       expect(emulator.stop).not.toHaveBeenCalled();
@@ -244,6 +276,10 @@ describe('VmCore lifecycle orchestration', () => {
     const scheduling = core as unknown as {
       calls: number;
       nextHostYieldAt: number;
+      executionProgress: {
+        recordHypercall(identity: string, returnAddress: number): void;
+        recordGuestFrameSubmitted(atMs: number): void;
+      };
       hypercallListener(): void;
       yieldToHost(): void;
       poll(): Promise<void>;
@@ -252,6 +288,8 @@ describe('VmCore lifecycle orchestration', () => {
     const yieldHost = vi.spyOn(scheduling, 'yieldToHost').mockImplementation(() => {});
     const poll = vi.spyOn(scheduling, 'poll').mockResolvedValue();
     try {
+      scheduling.executionProgress.recordHypercall('KERNEL32.DLL!Sleep', 0x1234);
+      scheduling.executionProgress.recordGuestFrameSubmitted(99);
       scheduling.calls = 1;
       scheduling.nextHostYieldAt = 104;
       scheduling.hypercallListener();
@@ -305,6 +343,14 @@ describe('VmCore lifecycle orchestration', () => {
       writeU32(emulator, HYPERCALL_REQUEST, 999);
       await (core as unknown as { poll(): Promise<void> }).poll();
       expect(dispatch).toHaveBeenCalledOnce();
+      const diagnostics = await core.getDiagnostics('sample');
+      expect(diagnostics.executionProgress).toMatchObject({
+        guestFrameSequence: 0,
+        guestFrameAgeMs: null,
+        hypercallsSinceLastFrame: 1,
+        lastHypercallIdentity: 'KERNEL32.DLL!FindFirstFileA',
+        lastGuestReturnAddress: 0,
+      });
     } finally {
       await core.destroy();
     }

@@ -14,6 +14,7 @@ import {
   HYPERCALL_QPC_HIGH,
   HYPERCALL_QPC_LOW,
   HYPERCALL_LAST_ERROR,
+  HYPERCALL_CALLBACK_DEPTH,
   HYPERCALL_CURSOR_COUNT,
   HYPERCALL_CURSOR_X,
   HYPERCALL_CURSOR_Y,
@@ -263,6 +264,52 @@ export interface SoundConsumerCursor {
   authoritative?: boolean;
   generation?: number;
   sequence?: number;
+}
+
+/** Bounded scalar snapshot of the existing special-media and streaming state. */
+export interface VmSpecialMediaStreamTrace {
+  id: number;
+  producerCursorUncached: boolean;
+  size: number;
+  formatTag: number;
+  channels: number;
+  sampleRateHz: number;
+  bitsPerSample: number;
+  blockAlign: number;
+  frequency: number;
+  playing: boolean;
+  looping: boolean;
+  workerPlayCursor: number;
+  returnedWriteCursor: number;
+  candidateSafeWriteCursor: number;
+  cacheHits: number;
+  hostRefreshes: number;
+  maxCacheAgeMs: number;
+  lockFlags: number;
+  requestedOffset: number;
+  requestedBytes: number;
+  resolvedOrigin: number;
+  firstOffset: number;
+  firstBytes: number;
+  secondOffset: number;
+  secondBytes: number;
+  unsafeOverlap: boolean;
+  unlockBytes: number;
+  repeatedRegionCount: number;
+  observedAtMs: number;
+}
+
+export interface VmSpecialMediaSnapshot {
+  binkOpenGeneration: number;
+  binkCloseGeneration: number;
+  nativeBinkActive: boolean;
+  closeReturnPending: boolean;
+  pinnedThread: number | null;
+  pinnedDepth: number | null;
+  activeCallbackDepth: number;
+  pendingDeadlineCount: number;
+  ownedSoundBufferCount: number;
+  streamingTraces: VmSpecialMediaStreamTrace[];
 }
 
 export interface SoundStreamingTrace {
@@ -521,6 +568,8 @@ const CommonWin32Shim = withOle32(
 );
 
 export class Win32ShimBase extends CommonWin32Shim {
+  private binkOpenGeneration = 0;
+  private binkCloseGeneration = 0;
   private moviePlaybackTracker: VmMoviePlaybackTracker = {
     lastNonEmptyShellPageTitle: '',
     previousNativeBinkActive: false,
@@ -535,6 +584,47 @@ export class Win32ShimBase extends CommonWin32Shim {
     );
     this.moviePlaybackTracker = update.tracker;
     return update.state;
+  }
+
+  /** Snapshot state only; this method does not dispatch guest APIs or mutate shim state. */
+  inspectSpecialMediaState(): VmSpecialMediaSnapshot {
+    const pinnedThread = this.nativeBinkPinnedThread;
+    const pinnedDepth = pinnedThread === null ? null : this.readU32(GUEST_THREAD_CRITICAL_DEPTH + pinnedThread * 4);
+    const pendingDeadlineCount = this.inspectGuestThreads().reduce(
+      (count, thread) => count + Number(thread.waitInMs !== undefined),
+      0,
+    );
+    const streamingTraces = this.getSoundStreamingTraces()
+      .slice(-4)
+      .map(({ format, ...trace }) => ({
+        ...trace,
+        formatTag: format.wFormatTag,
+        channels: format.nChannels,
+        sampleRateHz: format.nSamplesPerSec,
+        bitsPerSample: format.wBitsPerSample,
+        blockAlign: format.nBlockAlign,
+      }));
+
+    return {
+      binkOpenGeneration: this.binkOpenGeneration,
+      binkCloseGeneration: this.binkCloseGeneration,
+      nativeBinkActive: this.nativeBinkPlaybackActive,
+      closeReturnPending: this.nativeBinkThreadReleasePending,
+      pinnedThread,
+      pinnedDepth,
+      activeCallbackDepth: this.readU32(HYPERCALL_CALLBACK_DEPTH),
+      pendingDeadlineCount,
+      ownedSoundBufferCount: this.inspectResourceCounts().soundBuffers,
+      streamingTraces,
+    };
+  }
+
+  private recordBinkOpenGeneration(): void {
+    this.binkOpenGeneration = Math.min(Number.MAX_SAFE_INTEGER, this.binkOpenGeneration + 1);
+  }
+
+  private recordBinkCloseGeneration(): void {
+    this.binkCloseGeneration = Math.min(Number.MAX_SAFE_INTEGER, this.binkCloseGeneration + 1);
   }
 
   dispatch(call: Win32Call): Win32Result | null {
@@ -609,10 +699,12 @@ export class Win32ShimBase extends CommonWin32Shim {
           if (exportName === '_BinkSetSoundSystem@8') {
             this.nativeBinkSoundSystemReady = true;
           } else if (exportName === '_BinkOpen@8') {
+            this.recordBinkOpenGeneration();
             this.nativeBinkPlaybackActive = true;
             this.nativeBinkPlaybackOpens++;
             this.routeStaticGuestDllExports('BINKW32.DLL', DIRECT_NATIVE_BINK_EXPORTS, true);
           } else if (exportName === '_BinkClose@4') {
+            this.recordBinkCloseGeneration();
             this.nativeBinkPlaybackActive = false;
             // Only the return address has changed so far; guest BinkClose has not run. Keep the outer lock
             // until cleanup enters atomicGuestCall or the next import after full return.
@@ -646,6 +738,7 @@ export class Win32ShimBase extends CommonWin32Shim {
           this.writeU32(handle + 0x18, 1); // FrameRateDiv must be nonzero to avoid division by zero when computing frame intervals.
           this.binkVideos.add(handle);
           this.binkNextFrameAt.set(handle, this.clock.now());
+          this.recordBinkOpenGeneration();
           return { eax: handle };
         }
         // BinkWait paces by frame rate: return 0 when due so the game calls DoFrame/NextFrame,
@@ -692,6 +785,7 @@ export class Win32ShimBase extends CommonWin32Shim {
           this.releaseNativeBinkThread();
           this.binkVideos.delete(h);
           this.binkNextFrameAt.delete(h);
+          this.recordBinkCloseGeneration();
           return { eax: 0 };
         }
         case 'BINKW32.DLL!_BinkDoFrame@4':

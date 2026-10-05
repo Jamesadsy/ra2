@@ -14,6 +14,7 @@ on:
       - secondsun/ra2-m1-ios-073-streamed-cursor-cache-bypass
       - secondsun/ra2-m1-ios-074-sol-high-cameo-audio-recovery
       - secondsun/ra2-m1-ios-075-sol-high-bink-cameo-recovery
+      - secondsun/ra2-m1-ios-079-075-post-cameo-diagnostics
   workflow_dispatch:
 
 permissions:
@@ -50,6 +51,9 @@ jobs:
           node --version
           pnpm --version
           xcodebuild -version
+
+      - name: Prove exact-075 diagnostics-only ancestry and source boundary
+        run: node scripts/ios/proveRa2079Diagnostics.mjs
 
       - name: Install NASM
         run: brew install nasm

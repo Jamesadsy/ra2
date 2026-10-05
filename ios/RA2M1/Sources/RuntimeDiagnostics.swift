@@ -374,6 +374,9 @@ final class RuntimeDiagnosticsLog {
                     "audioTrustedGestureAttemptCount", "audioTrustedGestureResumeResult", "audioTrustedInteractionTrusted",
                     "audioLiveStreamedBuffers", "audioWorkletModuleLoaded",
                     "audioBufferFrequencyHz", "audioBufferSampleRateHz", "audioBufferChannels", "audioBufferBitsPerSample",
+                    "guestFrameSequence", "guestFrameAgeMs", "hypercallsSinceLastFrame", "lastGuestReturnAddress",
+                    "binkOpenGeneration", "binkCloseGeneration", "nativeBinkActive", "closeReturnPending",
+                    "pinnedThread", "pinnedDepth", "activeCallbackDepth", "pendingDeadlineCount", "ownedSoundBufferCount",
                     "audioBufferWriteCount", "audioBufferWriteAgeMs", "audioBufferFrequencyChanges",
                     "audioActiveBufferWriteCount", "audioMaxActiveBufferWriteAgeMs", "audioActiveBufferFrequencyChanges",
                     "audioMinActiveFrequencyHz", "audioMaxActiveFrequencyHz",
@@ -400,6 +403,16 @@ final class RuntimeDiagnosticsLog {
                value.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil {
                 fields.append("\(key)=\(value)")
             }
+        }
+        if let identity = body["lastHypercallIdentity"] as? String,
+           identity.count <= 96,
+           identity.range(of: "^[A-Za-z0-9_!.@:-]{1,96}$", options: .regularExpression) != nil {
+            fields.append("lastHypercallIdentity=\(identity)")
+        }
+        if let identities = body["topHypercalls"] as? String,
+           identities.count <= 512,
+           identities.range(of: "^[A-Za-z0-9_!.@:-;]{1,512}$", options: .regularExpression) != nil {
+            fields.append("topHypercalls=\(identities)")
         }
         if let value = body["audioBufferStates"] as? String,
            value.count <= 512,

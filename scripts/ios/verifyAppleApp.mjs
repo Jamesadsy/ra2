@@ -6,8 +6,13 @@ import { basename, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const base = process.env.ACCEPTED_BASE_SHA ?? '36022660b391d3cc84d608e1261bf25caf42e755';
 const expectedBranch = process.env.RA2_EXPECTED_SOURCE_BRANCH ?? 'secondsun/ra2-m1-ios-070-save-audio-recovery';
+const ra2DiagnosticsBranch = 'secondsun/ra2-m1-ios-079-075-post-cameo-diagnostics';
+const base =
+  process.env.ACCEPTED_BASE_SHA ??
+  (expectedBranch === ra2DiagnosticsBranch
+    ? '312e8a79d93c133992057663d8a85f71023c2008'
+    : '36022660b391d3cc84d608e1261bf25caf42e755');
 const [appPath, outputDirectory] = process.argv.slice(2).map((path) => resolve(path));
 if (!appPath || !outputDirectory) throw new Error('Usage: verifyAppleApp.mjs <RA2M1.app> <artifact-output-directory>');
 
@@ -21,7 +26,8 @@ const tree = run('git', ['rev-parse', 'HEAD^{tree}']);
 const parent = run('git', ['rev-parse', 'HEAD^']);
 const mergeBase = run('git', ['merge-base', base, 'HEAD']);
 if (branch !== expectedBranch) fail('Unexpected source branch: ' + branch);
-if (mergeBase !== base) fail('The accepted 069 HEAD is not the source ancestor.');
+if (branch === ra2DiagnosticsBranch && parent !== base) fail('RA2 079 must be based directly on protected 075 HEAD.');
+if (mergeBase !== base) fail('The accepted base HEAD is not the source ancestor.');
 const plist = JSON.parse(run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(appPath, 'Info.plist')]));
 if (plist.CFBundleIdentifier !== 'org.second-sun.ra2m1') fail('Unexpected app bundle identifier.');
 if (plist.CFBundleDisplayName !== 'CnC RA2' || plist.CFBundleName !== 'CnC RA2') {

@@ -123,7 +123,23 @@ class FakeCore implements VmWorkerCore {
   async getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {
     this.calls.push(`diagnostics:${action}`);
     if (this.fail === 'diagnostics') throw new Error('diagnostics failed');
-    return { sampledAtMs: 12, phase: 'running', hypercalls: 123, clockRate: this.clock, execution: null, game: null };
+    return {
+      sampledAtMs: 12,
+      phase: 'running',
+      hypercalls: 123,
+      clockRate: this.clock,
+      executionProgress: {
+        guestFrameSequence: 0,
+        guestFrameAgeMs: null,
+        hypercallsSinceLastFrame: 0,
+        lastHypercallIdentity: null,
+        topHypercalls: '',
+        lastGuestReturnAddress: null,
+      },
+      specialMedia: null,
+      execution: null,
+      game: null,
+    };
   }
   readonly calls: string[] = [];
   fileProvider: GameFileProvider | null = null;

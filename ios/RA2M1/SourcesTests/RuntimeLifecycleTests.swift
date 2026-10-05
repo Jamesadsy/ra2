@@ -142,6 +142,21 @@ final class RuntimeLifecycleTests: XCTestCase {
         ])
         diagnostics.recordWebMetrics([
             "producerCursorUncached": 1,
+            "guestFrameSequence": 10873,
+            "guestFrameAgeMs": 7012,
+            "hypercallsSinceLastFrame": 430001,
+            "lastGuestReturnAddress": 4294967295,
+            "binkOpenGeneration": 2,
+            "binkCloseGeneration": 2,
+            "nativeBinkActive": 0,
+            "closeReturnPending": 0,
+            "pinnedThread": 0,
+            "pinnedDepth": 0,
+            "activeCallbackDepth": 0,
+            "pendingDeadlineCount": 1,
+            "ownedSoundBufferCount": 2,
+            "lastHypercallIdentity": "KERNEL32.DLL!Sleep",
+            "topHypercalls": "KERNEL32.DLL!Sleep:48;DSOUND.COM!IDirectSoundBuffer.Lock:16",
             "privateOwnerBytes": "MZ-retail-data-must-not-be-written",
         ])
 
@@ -156,6 +171,20 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(summary.contains("owner/maps02.mix  HTTP 206"))
         XCTAssertTrue(debug.contains("unhandledrejection"))
         XCTAssertTrue(debug.contains("producerCursorUncached=1"))
+        XCTAssertTrue(debug.contains("guestFrameSequence=10873"))
+        XCTAssertTrue(debug.contains("hypercallsSinceLastFrame=430001"))
+        XCTAssertTrue(debug.contains("lastGuestReturnAddress=4294967295"))
+        XCTAssertTrue(debug.contains("binkOpenGeneration=2"))
+        XCTAssertTrue(debug.contains("binkCloseGeneration=2"))
+        XCTAssertTrue(debug.contains("nativeBinkActive=0"))
+        XCTAssertTrue(debug.contains("closeReturnPending=0"))
+        XCTAssertTrue(debug.contains("pinnedThread=0"))
+        XCTAssertTrue(debug.contains("pinnedDepth=0"))
+        XCTAssertTrue(debug.contains("activeCallbackDepth=0"))
+        XCTAssertTrue(debug.contains("pendingDeadlineCount=1"))
+        XCTAssertTrue(debug.contains("ownedSoundBufferCount=2"))
+        XCTAssertTrue(debug.contains("lastHypercallIdentity=KERNEL32.DLL!Sleep"))
+        XCTAssertTrue(debug.contains("topHypercalls=KERNEL32.DLL!Sleep:48;DSOUND.COM!IDirectSoundBuffer.Lock:16"))
         XCTAssertTrue(touch.contains("pointerdown"))
         for value in [summary, debug, touch] {
             XCTAssertFalse(value.contains(token))

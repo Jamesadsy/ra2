@@ -159,6 +159,16 @@ it('a special-media cursor remains frozen without consumer progress and explicit
         DATA + 76,
         0,
       ]);
+      const cursorBeforeDiagnostics = m.read(DATA + 48);
+      const snapshot = m.shim.inspectSpecialMediaState();
+      expect(snapshot.streamingTraces.at(-1)?.producerCursorUncached).toBe(true);
+      const getPositionAfterDiagnostics = callShim(m.shim, 'DSOUND.COM!IDirectSoundBuffer.GetCurrentPosition', [
+        buffer,
+        DATA + 48,
+        0,
+      ]);
+      expect(getPositionAfterDiagnostics.eax).toBe(0);
+      expect(m.read(DATA + 48)).toBe(cursorBeforeDiagnostics);
       expect([m.read(DATA + 68), m.read(DATA + 76)]).toEqual([96, 96]);
       const position = m.read(m.read(buffer) + 16);
       m.code(PROGRAM, [
@@ -182,6 +192,38 @@ it('a special-media cursor remains frozen without consumer progress and explicit
       },
     },
   );
+});
+
+it('Bink diagnostics snapshot existing state without changing Open or Close results', () => {
+  const memory = createGuestMemory();
+  const shim = createTestShim(memory, {
+    files: new Map([['binkw32.dll', dll]]),
+    importArgBytes: () => 0,
+    gameProfile: { ...RA2_SHIM_PROFILE, guestDllPatches: {} },
+  });
+  shim.initializeGuestDllBeforeEntry('BINKW32.DLL', PROGRAM);
+
+  const before = shim.inspectSpecialMediaState();
+  const open = callShim(shim, 'BINKW32.DLL!_BinkOpen@8', [0, 0], DATA + 32);
+  const opened = shim.inspectSpecialMediaState();
+  expect(open.eax).toBeGreaterThan(0);
+  expect(opened).toMatchObject({
+    binkOpenGeneration: before.binkOpenGeneration + 1,
+    binkCloseGeneration: before.binkCloseGeneration,
+    nativeBinkActive: false,
+    closeReturnPending: false,
+  });
+  expect(shim.inspectSpecialMediaState()).toEqual(opened);
+
+  const close = callShim(shim, 'BINKW32.DLL!_BinkClose@4', [open.eax], DATA + 32);
+  const closed = shim.inspectSpecialMediaState();
+  expect(close.eax).toBe(0);
+  expect(closed).toMatchObject({
+    binkOpenGeneration: opened.binkOpenGeneration,
+    binkCloseGeneration: opened.binkCloseGeneration + 1,
+    nativeBinkActive: false,
+    closeReturnPending: false,
+  });
 });
 
 it('producer classification is bounded to a loaded configured secondary caller and follows duplicates', () => {

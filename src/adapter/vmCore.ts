@@ -52,6 +52,7 @@ import type { GameVmCallbacks, VmStatus } from '../app/session/runtimeEvents';
 import type { VmExecutionProbe } from '../vm86/diagnostics';
 import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
 import type { VmLifecycleSnapshot } from './vmLifecycle';
+import { ExecutionProgressTracker } from './executionProgress';
 
 const DEFAULT_GUEST_MEMORY_SIZE = 128 * 1024 * 1024;
 /** Recording sample interval: v86 has no per-write hook, so modification counts approximate sampling windows, incrementing once per window. */
@@ -131,6 +132,7 @@ export class VmCore {
   private gameClockRate = 1;
   private frameReader: Promise<GameFrameReader | null> | null = null;
   private readonly gamePerformance = new GamePerformanceMeter();
+  private readonly executionProgress = new ExecutionProgressTracker();
   private guestMemoryBytes = DEFAULT_GUEST_MEMORY_SIZE;
   private memRecordBase: Uint8Array | null = null;
   private memRecordPrev: Uint8Array | null = null;
@@ -178,6 +180,7 @@ export class VmCore {
   async start(): Promise<void> {
     if (this.emulator) throw new Error('VM 已创建');
     this.hasPresentedFrame = false;
+    this.executionProgress.reset();
     try {
       this.source = await this.platform.resourcePolicy.prepareSource(this.source);
       const { game, files: gameFiles, executableBytes: exe } = this.source;
@@ -285,6 +288,7 @@ export class VmCore {
         fastFileMirrorFiles: game.fastFileMirrorFiles,
         onFrame: (frame) => {
           this.hasPresentedFrame = true;
+          this.executionProgress.recordGuestFrameSubmitted(performance.now());
           this.callbacks.onFrame?.(frame);
         },
         onLogicFrame: () => {
@@ -510,6 +514,8 @@ export class VmCore {
         phase: this.currentPhase,
         hypercalls: this.calls,
         clockRate: this.gameClockRate,
+        executionProgress: this.executionProgress.snapshot(performance.now()),
+        specialMedia: this.shim?.inspectSpecialMediaState?.() ?? null,
         execution: this.platform.executionProbe?.sample() ?? null,
         game,
       };
@@ -710,7 +716,9 @@ export class VmCore {
         stack,
         args: readStackArgs(this.emulator, stack, imported.argBytes),
       };
-      this.lastCallStack = { key: imported.key, stack, returnAddress: this.readU32(stack) };
+      const returnAddress = this.readU32(stack);
+      this.lastCallStack = { key: imported.key, stack, returnAddress };
+      this.executionProgress.recordHypercall(imported.key, returnAddress);
       this.calls++;
       this.recentCalls.push(imported.key);
       if (this.recentCalls.length > 16) this.recentCalls.shift();

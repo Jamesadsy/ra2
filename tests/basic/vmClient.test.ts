@@ -206,6 +206,15 @@ describe('WorkerVmClient RPC lifecycle', () => {
       phase: 'running' as const,
       hypercalls: 80,
       clockRate: 1,
+      executionProgress: {
+        guestFrameSequence: 0,
+        guestFrameAgeMs: null,
+        hypercallsSinceLastFrame: 0,
+        lastHypercallIdentity: null,
+        topHypercalls: '',
+        lastGuestReturnAddress: null,
+      },
+      specialMedia: null,
       execution: null,
       game: null,
     };

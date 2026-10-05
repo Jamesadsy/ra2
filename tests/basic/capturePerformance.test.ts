@@ -13,6 +13,15 @@ function target() {
       phase: 'running',
       hypercalls: 10,
       clockRate: 1,
+      executionProgress: {
+        guestFrameSequence: 0,
+        guestFrameAgeMs: null,
+        hypercallsSinceLastFrame: 0,
+        lastHypercallIdentity: null,
+        topHypercalls: '',
+        lastGuestReturnAddress: null,
+      },
+      specialMedia: null,
       execution: null,
       game: null,
     })),
@@ -56,7 +65,23 @@ it('retains partial data and cleanup failures when an RPC fails', async () => {
   const vm = target();
   vm.getDiagnostics.mockImplementation(async (action) => {
     if (action !== 'start') throw new Error('worker request failed');
-    return { sampledAtMs: 0, phase: 'running', hypercalls: 10, clockRate: 1, execution: null, game: null };
+    return {
+      sampledAtMs: 0,
+      phase: 'running',
+      hypercalls: 10,
+      clockRate: 1,
+      executionProgress: {
+        guestFrameSequence: 0,
+        guestFrameAgeMs: null,
+        hypercallsSinceLastFrame: 0,
+        lastHypercallIdentity: null,
+        topHypercalls: '',
+        lastGuestReturnAddress: null,
+      },
+      specialMedia: null,
+      execution: null,
+      game: null,
+    };
   });
   const capture = capturePerformance(vm, {
     signal: new AbortController().signal,
