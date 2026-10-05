@@ -70,6 +70,8 @@ export type MainToWorkerMessage =
   | { type: 'volume'; linear: number }
   | {
       type: 'audio-cursor';
+      ownershipGeneration?: number;
+      renderClockProgressing?: boolean;
       id: number;
       positionBytes: number;
       playing: boolean;
@@ -129,7 +131,8 @@ export type WorkerToMainMessage =
 /**
  * Audio operations mirror Win32AudioSink (win32.ts:105-118). getState is never sent: synchronous cross-thread reads are unavailable, so ProxyAudioSink.getState returns null and the shim falls back to local accounting.
  */
-export type AudioOp =
+export type AudioOp = AudioOperation & { ownershipGeneration?: number };
+type AudioOperation =
   | { op: 'createBuffer'; id: number; byteLength: number; format: PcmWaveFormat }
   | { op: 'duplicateBuffer'; sourceId: number; destinationId: number }
   | { op: 'setFormat'; id: number; format: PcmWaveFormat }

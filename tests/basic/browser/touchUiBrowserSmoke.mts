@@ -64,7 +64,15 @@ try {
           },
           postMessage() {},
         };
-        const input = installGameInput(canvas, vm as unknown as import('../../../src/adapter/runtime').VmShell, false);
+        let movieActive = false;
+        const input = installGameInput(
+          canvas,
+          vm as unknown as import('../../../src/adapter/runtime').VmShell,
+          false,
+          undefined,
+          undefined,
+          () => movieActive,
+        );
         const { installCanvasFit } = (await import(inputUrl)) as typeof import('../../../src/ui/pages/game/gameInput');
         const fit = installCanvasFit(canvas, () => ({ width: 800, height: 600 }));
         const touch = installAdaptiveTouchControls(canvas, vm);
@@ -93,7 +101,14 @@ try {
             fit.destroy();
             toolbar.destroy();
           },
-          touchUiProbe: { cursorPositions, keyStates, touchClients },
+          touchUiProbe: {
+            cursorPositions,
+            keyStates,
+            touchClients,
+            setMovie(active: boolean) {
+              movieActive = active;
+            },
+          },
         });
       }, safeSide);
 
@@ -156,6 +171,49 @@ try {
       });
       expect(touchMapping.mapped).toEqual(touchMapping.expected);
 
+      // Trusted touch input traverses the production 400ms timer, including ordinary right-click fallback.
+      const session = await context.newCDPSession(page);
+      for (const active of [true, false]) {
+        const start = await page.evaluate((movie) => {
+          const probe = (
+            window as unknown as {
+              touchUiProbe: {
+                keyStates: Array<{ vk: number; down: boolean }>;
+                setMovie(active: boolean): void;
+              };
+            }
+          ).touchUiProbe;
+          probe.setMovie(movie);
+          return probe.keyStates.length;
+        }, active);
+        await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+        await page.waitForTimeout(550);
+        await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        const keys = await page.evaluate(
+          (index) =>
+            (
+              window as unknown as { touchUiProbe: { keyStates: Array<{ vk: number; down: boolean }> } }
+            ).touchUiProbe.keyStates.slice(index),
+          start,
+        );
+        expect(keys).toEqual([
+          { vk: active ? 0x1b : 0x02, down: true },
+          { vk: active ? 0x1b : 0x02, down: false },
+        ]);
+      }
+      await session.detach();
+      await page.keyboard.press('Escape');
+      expect(
+        await page.evaluate(() =>
+          (
+            window as unknown as { touchUiProbe: { keyStates: Array<{ vk: number; down: boolean }> } }
+          ).touchUiProbe.keyStates.slice(-2),
+        ),
+      ).toEqual([
+        { vk: 0x1b, down: true },
+        { vk: 0x1b, down: false },
+      ]);
+
       if (viewport.height <= 600) {
         const geometry = await page.evaluate(() => {
           const canvasBox = document.querySelector<HTMLElement>('#screen')!.getBoundingClientRect();
@@ -164,11 +222,17 @@ try {
           const buttons = [...document.querySelectorAll<HTMLElement>('#vm-touch-controls > .touch-key')].map(
             (button) => {
               const box = button.getBoundingClientRect();
+              const label = document.createRange();
+              label.selectNodeContents(button);
+              const text = label.getBoundingClientRect();
+              const style = getComputedStyle(button);
               return {
                 role: button.dataset.role ?? button.dataset.code,
                 width: box.width,
                 height: box.height,
                 visible: getComputedStyle(button).display !== 'none',
+                labelFits:
+                  text.width <= button.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
               };
             },
           );
@@ -208,6 +272,7 @@ try {
         expect(geometry.canvas.right).toBeLessThanOrEqual(geometry.rail.x);
         expect(geometry.rail.width).toBeLessThanOrEqual(52);
         expect(geometry.rail.height).toBeLessThanOrEqual(200);
+        expect(geometry.buttons.find((button) => button.role === 'Space')?.labelFits).toBe(true);
         expect(geometry.rail.right).toBeLessThanOrEqual(viewport.width - safeSide + 0.5);
         expect(Math.abs(geometry.rail.y + geometry.rail.height / 2 - viewport.height / 2)).toBeLessThanOrEqual(1);
         expect(geometry.buttons.map((button) => button.role)).toEqual(['collapse', 'Escape', 'Enter', 'Space']);

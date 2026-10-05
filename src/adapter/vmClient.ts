@@ -113,6 +113,9 @@ export class WorkerVmClient implements VmShell {
             this.worker.postMessage({ type: 'audio-reader', id, reader });
           }
         },
+        onStaticCursor: (id, cursor) => {
+          if (typeof id === 'number') this.publishAudioCursor(id, cursor, 0);
+        },
         onError: (error) => {
           console.warn('[VM audio]', error);
           reportNativeRuntimeError('audio', error);
@@ -603,6 +606,28 @@ export class WorkerVmClient implements VmShell {
     };
   }
 
+  private publishAudioCursor(
+    id: number,
+    consumer: NonNullable<ReturnType<WebAudioPcmSink['getStreamCursorTrace']>>,
+    transportLatencyMs: number,
+  ): void {
+    if (!consumer.sampleRate || consumer.readerAuthoritative || this.lifecycleState !== 'active') return;
+    this.worker.postMessage({
+      type: 'audio-cursor',
+      id,
+      ownershipGeneration: consumer.ownershipGeneration,
+      renderClockProgressing: consumer.renderClockProgressing,
+      positionBytes: consumer.cursor,
+      playing: consumer.playing,
+      byteLength: consumer.byteLength,
+      blockAlign: consumer.blockAlign,
+      frequency: consumer.frequency,
+      outputSampleRateHz: consumer.sampleRate,
+      observedAtEpochMs: Date.now(),
+      transportLatencyMs,
+    });
+  }
+
   private applyAudioOp(op: AudioOp): void {
     switch (op.op) {
       case 'streamTrace': {
@@ -612,20 +637,7 @@ export class WorkerVmClient implements VmShell {
         const trace = op.trace;
         const consumer = this.audio.getStreamCursorTrace(trace.id);
         const workerToMainAgeMs = Math.max(0, Date.now() - trace.observedAtMs);
-        if (consumer?.sampleRate && !consumer.readerAuthoritative && this.lifecycleState === 'active') {
-          this.worker.postMessage({
-            type: 'audio-cursor',
-            id: trace.id,
-            positionBytes: consumer.cursor,
-            playing: consumer.playing,
-            byteLength: consumer.byteLength,
-            blockAlign: consumer.blockAlign,
-            frequency: consumer.frequency,
-            outputSampleRateHz: consumer.sampleRate,
-            observedAtEpochMs: Date.now(),
-            transportLatencyMs: workerToMainAgeMs,
-          });
-        }
+        if (consumer) this.publishAudioCursor(trace.id, consumer, workerToMainAgeMs);
         reportNativeRuntimeMetrics({
           event: 'audio-stream',
           bufferId: trace.id,
@@ -665,22 +677,22 @@ export class WorkerVmClient implements VmShell {
         break;
       }
       case 'createBuffer':
-        this.audio.createBuffer(op.id, op.byteLength, op.format);
+        this.audio.createBuffer(op.id, op.byteLength, op.format, op.ownershipGeneration);
         break;
       case 'duplicateBuffer':
-        this.audio.duplicateBuffer(op.sourceId, op.destinationId);
+        this.audio.duplicateBuffer(op.sourceId, op.destinationId, op.ownershipGeneration);
         break;
       case 'setFormat':
-        this.audio.setFormat(op.id, op.format);
+        this.audio.setFormat(op.id, op.format, op.ownershipGeneration);
         break;
       case 'writeBuffer':
         this.audio.writeBuffer(op.id, op.offset, op.bytes);
         break;
       case 'play':
-        this.audio.play(op.id, op.options);
+        this.audio.play(op.id, op.options, op.ownershipGeneration);
         break;
       case 'stop':
-        this.audio.stop(op.id);
+        this.audio.stop(op.id, op.ownershipGeneration);
         break;
       case 'setCurrentPosition':
         this.audio.setCurrentPosition(op.id, op.byteOffset);

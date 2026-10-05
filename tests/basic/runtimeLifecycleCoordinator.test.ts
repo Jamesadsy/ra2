@@ -68,7 +68,7 @@ function audioSnapshot(): VmAudioLifecycleSnapshot {
   };
 }
 
-function setup(resumeWorker = workerSnapshot()) {
+function setup(resumeWorker = workerSnapshot(), unlock?: () => Promise<VmLifecycleReport>) {
   const win = Object.assign(new EventTarget(), {
     setInterval: () => 1,
     clearInterval: vi.fn(),
@@ -101,6 +101,7 @@ function setup(resumeWorker = workerSnapshot()) {
         } as VmLifecycleReport;
       }
       if (action === 'resume') return { action, worker: resumeWorker, audio: audioSnapshot() } as VmLifecycleReport;
+      if (action === 'audio-unlock' && unlock) return unlock();
       if (action === 'audio-unlock')
         return {
           action,
@@ -123,6 +124,79 @@ function setup(resumeWorker = workerSnapshot()) {
 }
 
 describe('RA2 lifecycle coordination', () => {
+  it.each([true, false])('automatic denial waits for the trusted owner; successful recovery=%s', async (success) => {
+    let complete!: (report: VmLifecycleReport) => void;
+    const test = setup(
+      workerSnapshot(),
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    try {
+      test.emit('background', 1000);
+      await test.settle();
+      test.doc.dispatchEvent(new Event('visibilitychange'));
+      test.emit('foreground', 2000);
+      test.emit('foreground', 2001);
+      await test.settle();
+      expect(test.actions.filter((a) => a === 'resume')).toHaveLength(1);
+      const event = Object.defineProperty(new Event('pointerdown'), 'isTrusted', { value: true });
+      test.win.dispatchEvent(event);
+      test.win.dispatchEvent(Object.defineProperty(new Event('touchstart'), 'isTrusted', { value: true }));
+      await test.settle();
+      expect(test.actions.filter((a) => a === 'audio-unlock')).toHaveLength(1);
+      expect(test.showRecovery).not.toHaveBeenCalled();
+      complete({
+        action: 'audio-unlock',
+        worker: workerSnapshot(),
+        audio: {
+          ...audioSnapshot(),
+          unlockResult: success,
+          rendererProgressProven: success,
+          lifecycleRecoveryPending: !success,
+        },
+      });
+      await test.settle();
+      expect(test.showRecovery).toHaveBeenCalledTimes(success ? 0 : 1);
+      if (!success) expect(test.showRecovery).toHaveBeenCalledWith('audio-resume-failed-after-user-interaction');
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it('a stale trusted failure after the next background cannot require a restart', async () => {
+    let complete!: (report: VmLifecycleReport) => void;
+    const test = setup(
+      workerSnapshot(),
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    try {
+      test.emit('background', 1000);
+      await test.settle();
+      test.emit('foreground', 2000);
+      await test.settle();
+      test.win.dispatchEvent(Object.defineProperty(new Event('keydown'), 'isTrusted', { value: true }));
+      await test.settle();
+      test.emit('background', 3000);
+      complete({
+        action: 'audio-unlock',
+        worker: workerSnapshot(),
+        audio: { ...audioSnapshot(), unlockResult: false },
+      });
+      await test.settle();
+      expect(test.showRecovery).not.toHaveBeenCalled();
+      test.emit('foreground', 4000);
+      await test.settle();
+      expect(test.actions.filter((a) => a === 'resume')).toHaveLength(2);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it('short and 20m46s cycles keep the same guest clock, probe Worker, and unlock audio on first input', async () => {
     const test = setup();
     try {

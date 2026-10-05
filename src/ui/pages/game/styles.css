@@ -2454,6 +2454,11 @@ html[data-host-platform='ios'][data-host-immersive='true'] #stage {
   }
 
   /* Short landscape uses the floating joystick for scrolling; preserve the three game actions and collapse toggle. */
+  #vm-touch-controls .touch-key[data-code='Space'] {
+    font-size: 11px;
+    letter-spacing: 0;
+  }
+
   #vm-touch-controls .touch-dpad {
     display: none;
   }

@@ -156,8 +156,16 @@ final class LocalWebKitContractTests: XCTestCase {
 
         let diagnostics = RuntimeDiagnosticsLog(userURL: host.root)
         let lifecycle = RuntimeLifecycleCoordinator(webView: webView, diagnostics: diagnostics)
+        _ = try await webView.evaluateJavaScript("window.__ra2LifecycleEdges = []; window.__RA2NativeLifecycle = phase => window.__ra2LifecycleEdges.push(phase); 'ready'")
+        lifecycle.applicationWillResignActive()
         lifecycle.applicationDidEnterBackground()
         lifecycle.applicationWillEnterForeground()
+        let preparedEdges = try await webView.evaluateJavaScript("window.__ra2LifecycleEdges") as? [String]
+        XCTAssertEqual(preparedEdges, ["background"])
+        lifecycle.applicationDidBecomeActive()
+        lifecycle.applicationDidBecomeActive()
+        let activeEdges = try await webView.evaluateJavaScript("window.__ra2LifecycleEdges") as? [String]
+        XCTAssertEqual(activeEdges, ["background", "foreground"])
         try await startStorageRead(storeName, in: webView)
         let retained = try await waitForString("window.__ra2M1StorageRead", in: webView)
         try await reportStorage(webView, phase: "after-lifecycle")

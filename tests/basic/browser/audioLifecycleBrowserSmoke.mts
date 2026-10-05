@@ -8,8 +8,11 @@ try {
   const page = await browser.newPage({ ignoreHTTPSErrors: true });
   await preventThirdPartyDownloads(page);
   await page.goto(process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174/');
+  await page.evaluate(() => {
+    document.body.innerHTML = '<button id="recover">Recover renderer</button>';
+  });
   // Observe production nodes and messages; do not replace the processor, audio clock or destruction behavior.
-  const result = await page.evaluate<{ cycles: number; contexts: string[]; processorCounts: number[] }>(`(async () => {
+  const execution = page.evaluate<{ cycles: number; contexts: string[]; processorCounts: number[] }>(`(async () => {
     const { WebAudioPcmSink } = await import('/src/adapter/audio.ts');
     const OriginalNode = AudioWorkletNode;
     const errors = [], contexts = [], processorCounts = [];
@@ -80,9 +83,18 @@ try {
               }
               const beforeResume = created;
               const resumed = await sink.resumeForLifecycle();
-              if(resumed.unlockResult !== true) throw new Error('AudioContext did not resume');
+              if(resumed.unlockResult !== false || !resumed.lifecycleRecoveryPending || created !== beforeResume) {
+                throw new Error('Automatic resume stole physical recovery ownership');
+              }
+              await new Promise((resolve, reject) => {
+                document.querySelector('#recover').addEventListener('pointerdown', event => {
+                  sink.unlockFromTrustedInteraction(event).then(ok => ok ? resolve() : reject(new Error('Trusted renderer failed')));
+                }, {once: true});
+                document.querySelector('#recover').setAttribute('data-ready', 'true');
+              });
               await wait(() => created === beforeResume + 1 && latest.messages > 0 && latest.count === 1);
               const afterLifecycle = sink.getLifecycleSnapshot();
+              if(!afterLifecycle.rendererProgressProven || afterLifecycle.lifecycleRecoveryPending) throw new Error('Renderer progress not proven');
               if(afterLifecycle.contextState !== 'running' || afterLifecycle.playingBuffers !== 1 || afterLifecycle.workletCount !== 1) {
                 throw new Error('Lifecycle resume did not rebuild the retained live worklet stream');
               }
@@ -106,6 +118,9 @@ try {
       globalThis.AudioWorkletNode = OriginalNode;
     }
   })()`);
+  await page.locator('#recover[data-ready="true"]').waitFor();
+  await page.locator('#recover').click();
+  const result = await execution;
   assert.equal(result.cycles, 32);
   assert.deepEqual(result.contexts, ['closed', 'closed']);
   assert.deepEqual(result.processorCounts, new Array(32).fill(1));

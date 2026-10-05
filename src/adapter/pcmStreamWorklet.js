@@ -37,6 +37,8 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
      * thread for the whole session, eventually starving rendering and silencing the game.
      */
     this.destroyed = false;
+    this.quiescePhase = 0;
+    this.lastOutput = [];
     this.port.onmessage = (event) => this.onMessage(event.data);
   }
 
@@ -82,12 +84,10 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
         break;
       }
       case 'quiesce': {
-        if (this.state) {
-          this.state.playing = false;
-          this.port.postMessage({ kind: 'quiesced', frame: this.state.frame });
-        } else {
-          this.port.postMessage({ kind: 'quiesced', frame: 0 });
-        }
+        if (this.state) this.state.playing = false;
+        // A message receipt is not a rendered silent boundary. Finish the previous sample over
+        // one output quantum, then acknowledge only after a complete silent quantum.
+        this.quiescePhase = 1;
         break;
       }
       case 'set-loop': {
@@ -133,10 +133,25 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
     if (this.destroyed) return false;
     const state = this.state;
     const output = outputs[0];
-    if (!state || !output || output.length === 0) return true;
+    if (!output || output.length === 0) return true;
     const length = output[0] ? output[0].length : 0;
     for (const channel of output) channel.fill(0);
-    if (!state.playing || state.frames <= 0) return true;
+    if (this.quiescePhase && length > 0) {
+      if (this.quiescePhase === 1) {
+        for (let channel = 0; channel < output.length; channel++) {
+          const last = this.lastOutput[channel] ?? 0;
+          for (let i = 0; i < length; i++) output[channel][i] = last * (1 - (i + 1) / length);
+        }
+        this.quiescePhase = 2;
+      } else {
+        this.quiescePhase = 0;
+        this.port.postMessage({ kind: 'quiesced', frame: state?.frame ?? 0 });
+      }
+      for (let channel = 0; channel < output.length; channel++)
+        this.lastOutput[channel] = output[channel][length - 1] ?? 0;
+      return true;
+    }
+    if (!state || !state.playing || state.frames <= 0) return true;
 
     let frame = state.frame;
     for (let i = 0; i < length; i++) {
@@ -164,6 +179,8 @@ class Ra2PcmStreamProcessor extends AudioWorkletProcessor {
       frame += state.step;
     }
     state.frame = frame;
+    for (let channel = 0; channel < output.length; channel++)
+      this.lastOutput[channel] = output[channel][length - 1] ?? 0;
     this.consumedOutputFrames = (this.consumedOutputFrames + length) >>> 0;
     this.publishReader();
 

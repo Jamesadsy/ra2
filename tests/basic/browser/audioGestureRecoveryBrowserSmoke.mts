@@ -94,7 +94,7 @@ try {
     { timeout: 10_000 },
   );
 
-  const delaysMs = [1_000, 7_000, 1_000];
+  const delaysMs = [1_000, 1_000, 1_000, 7_000, 30_000];
   const cycles = [];
   for (const [cycleIndex, delayMs] of delaysMs.entries()) {
     const before = await page.evaluate(() => window.__ra2AudioTest.snapshot());
@@ -115,7 +115,9 @@ try {
     assert.equal(automatic.automaticResumeAttempted, true);
     assert.equal(automatic.automaticResumeResult, false, 'the deterministic policy denies non-gesture resume');
     assert.equal(automatic.lifecycleRecoveryPending, true);
-    assert.equal(automatic.contextState, freshContextPolicy || cycleIndex === 2 ? 'running' : 'suspended');
+    assert.equal(automatic.contextState, cycleIndex === 2 ? 'running' : 'suspended');
+    assert.equal(automatic.contextCreationCount, before.contextCreationCount);
+    assert.equal(automatic.sourceCount + automatic.workletCount + automatic.streamCount, 0);
     const framesWhileAway = await page.evaluate(() => window.__ra2AudioTest.guestFrames);
 
     if (cycleIndex === 0) {
@@ -174,6 +176,7 @@ try {
       delete window.__ra2AudioTest.context.state;
     });
     assert.equal(after.trustedInteractionTrusted, true);
+    assert.equal(after.rendererProgressProven, true);
     assert.equal(
       after.trustedGestureAttemptCount,
       cycles.length + 2,
@@ -241,8 +244,8 @@ try {
     await window.__ra2AudioTest.destroy();
     return result;
   });
-  assert.equal(final.snapshot.contextCreationCount, freshContextPolicy ? 4 : 1);
-  assert.equal(final.snapshot.trustedGestureAttemptCount, 4, 'one start tap plus three recovery taps');
+  assert.equal(final.snapshot.contextCreationCount, freshContextPolicy ? delaysMs.length + 1 : 1);
+  assert.equal(final.snapshot.trustedGestureAttemptCount, delaysMs.length + 1, 'one start tap plus each recovery tap');
   assert.equal(final.snapshot.contextState, 'running');
   console.log({
     policy: freshContextPolicy ? 'fresh' : 'same',

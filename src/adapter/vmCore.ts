@@ -1,6 +1,7 @@
 import { GamePerformanceMeter, type GameFrameReader, type GamePerformanceSample } from './gamePerformance';
 import { V86 } from 'v86';
 import { RangePrefetch } from './rangePrefetch';
+import { ExecutionProgress } from './executionProgress';
 import { readGuestFileSearch } from './fileSearch';
 import v86WasmUrl from 'v86/build/v86.wasm?url';
 import bootUrl from '../vm86/boot.bin?url';
@@ -124,6 +125,7 @@ export class VmCore {
   private guestLogicFrame = 0;
   private calls = 0;
   private readonly recentCalls: string[] = [];
+  private readonly executionProgress = new ExecutionProgress();
   private lastMoviePlaybackState = '';
   private lastCallStack: { key: string; stack: number; returnAddress: number } | null = null;
   private readonly pendingFileWrites = new Set<Promise<void>>();
@@ -284,6 +286,7 @@ export class VmCore {
           game.fastFileMirrorTop === undefined ? undefined : Math.min(game.fastFileMirrorTop, guestMemoryBytes),
         fastFileMirrorFiles: game.fastFileMirrorFiles,
         onFrame: (frame) => {
+          this.executionProgress.frame(performance.now());
           this.hasPresentedFrame = true;
           this.callbacks.onFrame?.(frame);
         },
@@ -511,6 +514,11 @@ export class VmCore {
         hypercalls: this.calls,
         clockRate: this.gameClockRate,
         execution: this.platform.executionProbe?.sample() ?? null,
+        progress: {
+          ...this.executionProgress.sample(performance.now(), this.currentPhase === 'running' && !this.lifecyclePaused),
+          lastCall: this.lastCallStack,
+          media: this.shim?.inspectSpecialMediaState() ?? null,
+        },
         game,
       };
     } catch (error) {
@@ -712,6 +720,7 @@ export class VmCore {
       };
       this.lastCallStack = { key: imported.key, stack, returnAddress: this.readU32(stack) };
       this.calls++;
+      this.executionProgress.call(imported.key);
       this.recentCalls.push(imported.key);
       if (this.recentCalls.length > 16) this.recentCalls.shift();
       this.callbacks.onCall?.(call, this.calls);

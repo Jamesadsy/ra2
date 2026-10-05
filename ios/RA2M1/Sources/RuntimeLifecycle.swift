@@ -18,11 +18,21 @@ final class RuntimeLifecycleCoordinator {
     }
 
     func applicationDidEnterBackground() {
+        guard phase != .background else { return }
         phase = .background
         dispatchLifecycle("background")
     }
 
+    func applicationWillResignActive() {
+        applicationDidEnterBackground()
+    }
+
     func applicationWillEnterForeground() {
+        diagnostics.recordNativeMetrics("audio lifecycle foreground preparation")
+    }
+
+    func applicationDidBecomeActive() {
+        guard phase != .foreground else { return }
         phase = .foreground
         dispatchLifecycle("foreground")
     }

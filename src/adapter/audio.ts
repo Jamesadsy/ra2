@@ -54,6 +54,8 @@ export interface PcmBufferSnapshot {
 export interface WebAudioPcmSinkOptions {
   /** Share only renderer cursor metadata with the guest Worker, once per renderer generation. */
   onStreamReader?: (id: PcmBufferId, reader: AudioReader) => void;
+  /** Static startup consumption must be observable before the first playing refill creates a reader. */
+  onStaticCursor?: (id: PcmBufferId, cursor: NonNullable<ReturnType<WebAudioPcmSink['getStreamCursorTrace']>>) => void;
   /** Supports tests or output into an existing AudioContext. */
   contextFactory?: () => AudioContext;
   /** Connect to context.destination by default. */
@@ -87,6 +89,8 @@ interface PcmBufferState {
   workletPositionAt: number;
   /** Wall-clock age remains meaningful while AudioContext.currentTime is suspended. */
   workletPositionUpdatedAtMs: number | null;
+  rendererProgress: number;
+  ownershipGeneration: number;
   gain: GainNode | null;
   panner: StereoPannerNode | null;
   positionBytes: number;
@@ -158,12 +162,17 @@ export class WebAudioPcmSink {
     bufferDuplicates: 0,
   };
   private diagnosticsTimer: ReturnType<typeof globalThis.setInterval> | null = null;
+  private staticCursorTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   private lastDiagnosticsContextTime: number | null = null;
   /** Last processor count reported by the audio thread; grows without bound if disconnected nodes are never collected. */
   private liveWorkletProcessors = 0;
   private dynamicWriteStartedAt: number | null = null;
   private lifecycleRecoveryPending = false;
-  private freshContextPrepared = false;
+  private recoveryGeneration = 0;
+  private recoveryOwner: Promise<boolean> | null = null;
+  private recoveryGraphGeneration = -1;
+  private rendererProgressProven = false;
+  private shutdown: Promise<void> | null = null;
   private suspendCallAttempted = false;
   private suspendSucceeded: boolean | null = null;
   private automaticResumeAttempted = false;
@@ -192,6 +201,8 @@ export class WebAudioPcmSink {
     readerGeneration?: number;
     readerSequence?: number;
     readerAuthoritative?: boolean;
+    ownershipGeneration: number;
+    renderClockProgressing: boolean;
   } | null {
     const state = this.buffers.get(id);
     if (!state) return null;
@@ -211,6 +222,12 @@ export class WebAudioPcmSink {
       readerGeneration: reader?.generation,
       readerSequence: reader?.sequence,
       readerAuthoritative: reader?.authoritative,
+      ownershipGeneration: state.ownershipGeneration,
+      renderClockProgressing:
+        this.context !== null &&
+        this.context.state === 'running' &&
+        (state.source !== null || state.stream !== null || state.worklet !== null) &&
+        this.context.currentTime > state.startedAt,
     };
   }
 
@@ -231,12 +248,25 @@ export class WebAudioPcmSink {
   }
 
   constructor(private readonly options: WebAudioPcmSinkOptions = {}) {
+    if (options.onStaticCursor) {
+      this.staticCursorTimer = globalThis.setInterval(() => {
+        if (this.destroyed || this.shutdown || this.lifecycleRecoveryPending) return;
+        for (const state of this.buffers.values()) {
+          if (state.playing && state.source) options.onStaticCursor?.(state.id, this.getStreamCursorTrace(state.id)!);
+        }
+      }, 30);
+    }
     if (options.diagnosticsIntervalMs) {
       this.diagnosticsTimer = globalThis.setInterval(() => this.logDiagnostics(), options.diagnosticsIntervalMs);
     }
   }
 
-  createBuffer(id: PcmBufferId, byteLength: number, format: PcmWaveFormat = DEFAULT_PCM_FORMAT as PcmWaveFormat): void {
+  createBuffer(
+    id: PcmBufferId,
+    byteLength: number,
+    format: PcmWaveFormat = DEFAULT_PCM_FORMAT as PcmWaveFormat,
+    ownershipGeneration = 0,
+  ): void {
     this.assertAlive();
     this.activity.bufferCreates++;
     this.releaseBuffer(id);
@@ -259,6 +289,8 @@ export class WebAudioPcmSink {
       frequencyChangeCount: 0,
       workletPositionAt: 0,
       workletPositionUpdatedAtMs: null,
+      rendererProgress: 0,
+      ownershipGeneration,
       gain: null,
       panner: null,
       positionBytes: 0,
@@ -272,11 +304,11 @@ export class WebAudioPcmSink {
     });
   }
 
-  duplicateBuffer(sourceId: PcmBufferId, destinationId: PcmBufferId): boolean {
+  duplicateBuffer(sourceId: PcmBufferId, destinationId: PcmBufferId, ownershipGeneration = 0): boolean {
     const source = this.buffers.get(sourceId);
     if (!source) return false;
     this.activity.bufferDuplicates++;
-    this.createBuffer(destinationId, source.pcm.byteLength, source.format);
+    this.createBuffer(destinationId, source.pcm.byteLength, source.format, ownershipGeneration);
     const destination = this.buffers.get(destinationId)!;
     destination.pcm.set(source.pcm);
     destination.volume = source.volume;
@@ -285,9 +317,10 @@ export class WebAudioPcmSink {
     return true;
   }
 
-  setFormat(id: PcmBufferId, format: PcmWaveFormat): boolean {
+  setFormat(id: PcmBufferId, format: PcmWaveFormat, ownershipGeneration?: number): boolean {
     const state = this.buffers.get(id);
     if (!state) return false;
+    if (ownershipGeneration !== undefined) state.ownershipGeneration = ownershipGeneration;
     const wasPlaying = state.playing;
     const position = this.currentPosition(state);
     this.detachPlayback(state);
@@ -330,10 +363,11 @@ export class WebAudioPcmSink {
     return length;
   }
 
-  play(id: PcmBufferId, options: PcmPlayOptions = {}): boolean {
+  play(id: PcmBufferId, options: PcmPlayOptions = {}, ownershipGeneration?: number): boolean {
     this.activity.plays++;
     const state = this.buffers.get(id);
     if (!state) return false;
+    if (ownershipGeneration !== undefined) state.ownershipGeneration = ownershipGeneration;
     state.loop = options.loop ?? false;
     if ((state.source || state.stream || state.worklet) && options.fromByte === undefined) {
       // IDirectSoundBuffer::Play does not restart an already playing buffer from the beginning.
@@ -353,10 +387,11 @@ export class WebAudioPcmSink {
     return true;
   }
 
-  stop(id: PcmBufferId): boolean {
+  stop(id: PcmBufferId, ownershipGeneration?: number): boolean {
     this.activity.stops++;
     const state = this.buffers.get(id);
     if (!state) return false;
+    if (ownershipGeneration !== undefined) state.ownershipGeneration = ownershipGeneration;
     state.positionBytes = this.currentPosition(state);
     state.playing = false;
     this.detachPlayback(state, false);
@@ -504,6 +539,8 @@ export class WebAudioPcmSink {
       retiredContextCount: this.retiredContextCount,
       retiredContextCloseFailures: this.retiredContextCloseFailures,
       lifecycleRecoveryPending: this.lifecycleRecoveryPending,
+      recoveryGeneration: this.recoveryGeneration,
+      rendererProgressProven: this.rendererProgressProven,
       suspendCallAttempted: this.suspendCallAttempted,
       suspendSucceeded: this.suspendSucceeded,
       automaticResumeAttempted: this.automaticResumeAttempted,
@@ -579,7 +616,13 @@ export class WebAudioPcmSink {
   async suspendForLifecycle(): Promise<VmAudioLifecycleSnapshot> {
     const before = this.getLifecycleSnapshot();
     this.lifecycleRecoveryPending = true;
-    this.freshContextPrepared = false;
+    this.recoveryGeneration++;
+    const generation = this.recoveryGeneration;
+    const context = this.context;
+    const owned = () => generation === this.recoveryGeneration && context === this.context && !this.destroyed;
+    this.recoveryOwner = null;
+    this.recoveryGraphGeneration = -1;
+    this.rendererProgressProven = false;
     this.suspendCallAttempted = false;
     this.suspendSucceeded = null;
     this.automaticResumeAttempted = false;
@@ -604,14 +647,19 @@ export class WebAudioPcmSink {
     // gives the audio thread a coherent silent boundary instead of leaving a final PCM quantum live.
     await Promise.all(
       [...this.buffers.values()].map(async (state) => {
+        const worklet = state.worklet;
         if (state.worklet) {
           await this.quiesceWorklet(state);
+          if (!owned() || state.worklet !== worklet) return;
           await this.destroyWorklet(state);
+        } else {
+          await this.quiesceStaticPlayback(state, context);
         }
+        if (!owned() || state.worklet !== worklet) return;
         this.detachPlayback(state, false, false);
       }),
     );
-    const context = this.context;
+    if (!owned()) return this.getLifecycleSnapshot();
     if (context && context.state !== 'closed') {
       this.suspendSucceeded = context.state === 'suspended';
     }
@@ -619,8 +667,10 @@ export class WebAudioPcmSink {
       this.suspendCallAttempted = true;
       try {
         await context.suspend();
+        if (!owned()) return this.getLifecycleSnapshot();
         this.suspendSucceeded = readContextState(context) === 'suspended';
       } catch (error) {
+        if (!owned()) return this.getLifecycleSnapshot();
         this.suspendSucceeded = false;
         this.report(error);
       }
@@ -630,15 +680,24 @@ export class WebAudioPcmSink {
 
   /** Try a seamless foreground resume; if iOS requires a gesture, persistent unlock hooks rebuild playback on first input. */
   async resumeForLifecycle(): Promise<VmAudioLifecycleSnapshot> {
-    if (this.lifecycleRecoveryPending && this.options.foregroundRecoveryPolicy === 'fresh-context-on-trusted-input') {
-      this.freshContextPrepared = this.replaceContextForTrustedRecovery() !== null;
-    }
+    if (this.lifecycleRecoveryPending && this.recoveryOwner) return this.getLifecycleSnapshot(false);
+    const generation = this.recoveryGeneration;
     const context = this.context;
     this.automaticResumeAttempted = context !== null && context.state !== 'closed';
     this.automaticResumeResult = null;
     if (!context || context.state === 'closed') return this.getLifecycleSnapshot(false);
-    const unlocked = await this.resumeAndRestore(context, true, undefined, false);
-    this.automaticResumeResult = unlocked;
+    // Automatic/native signals may resume the clock, but cannot own pending physical reconstruction.
+    if (this.lifecycleRecoveryPending) {
+      try {
+        await context.resume();
+      } catch (error) {
+        this.report(error);
+      }
+      if (generation === this.recoveryGeneration) this.automaticResumeResult = false;
+      return this.getLifecycleSnapshot(false);
+    }
+    const unlocked = await this.resumeAndRestore(context, true, undefined, false, generation);
+    if (generation === this.recoveryGeneration) this.automaticResumeResult = unlocked;
     return this.getLifecycleSnapshot(unlocked);
   }
 
@@ -675,7 +734,8 @@ export class WebAudioPcmSink {
 
   /** Must be called from a user gesture such as pointerdown/keydown. */
   async unlock(): Promise<boolean> {
-    if (this.destroyed) return false;
+    if (this.destroyed || this.shutdown) return false;
+    if (this.lifecycleRecoveryPending) return false;
     const context = this.ensureContext();
     if (!context) return false;
     return this.resumeAndRestore(context, this.lifecycleRecoveryPending, undefined, false);
@@ -683,21 +743,24 @@ export class WebAudioPcmSink {
 
   /** Invoke AudioContext.resume synchronously inside a verified trusted input event, including WebKit's reported-running recovery case. */
   unlockFromTrustedInteraction(event: Event): Promise<boolean> {
+    if (this.destroyed || this.shutdown) return Promise.resolve(false);
     if (!event.isTrusted) {
       this.trustedInteractionTrusted = false;
       return Promise.resolve(false);
     }
     const previous = this.gestureUnlocks.get(event);
     if (previous) return previous;
+    if (this.lifecycleRecoveryPending && this.recoveryOwner) return this.recoveryOwner;
+    const generation = this.recoveryGeneration;
+    const recovering = this.lifecycleRecoveryPending;
+    if (recovering) this.recoveryGraphGeneration = generation;
     this.trustedGestureAttemptCount++;
     this.trustedInteractionTrusted = true;
     this.trustedEventType = event.type;
     this.trustedEventTimestampMs = Date.now();
     this.trustedGestureResumeResult = null;
     const replaceContext =
-      this.lifecycleRecoveryPending &&
-      !this.freshContextPrepared &&
-      this.options.foregroundRecoveryPolicy === 'fresh-context-on-trusted-input';
+      this.lifecycleRecoveryPending && this.options.foregroundRecoveryPolicy === 'fresh-context-on-trusted-input';
     const context = this.destroyed
       ? null
       : replaceContext
@@ -706,10 +769,11 @@ export class WebAudioPcmSink {
     if (!context) {
       this.trustedGestureResumeResult = false;
       const failed = Promise.resolve(false);
+      if (recovering) this.recoveryOwner = failed;
       this.gestureUnlocks.set(event, failed);
       return failed;
     }
-    if (replaceContext || this.freshContextPrepared) {
+    if (recovering) {
       // WebKit may require source.start as well as context.resume to occur on the trusted stack.
       for (const state of this.buffers.values()) {
         if (state.playing && !state.source && !state.stream && !state.worklet) this.start(state);
@@ -720,18 +784,18 @@ export class WebAudioPcmSink {
       // The call must happen before this handler returns: WebKit checks the current trusted event stack.
       if (this.lifecycleRecoveryPending || context.state !== 'running') {
         this.trustedResumeCallTimestampMs = Date.now();
-        if (this.freshContextPrepared && context.state === 'running')
-          void context.suspend().catch((error) => this.report(error));
         resume = context.resume();
       }
     } catch (error) {
       this.report(error);
       this.trustedGestureResumeResult = false;
       const failed = Promise.resolve(false);
+      if (recovering) this.recoveryOwner = failed;
       this.gestureUnlocks.set(event, failed);
       return failed;
     }
-    const pending = this.resumeAndRestore(context, false, resume, true);
+    const pending = this.resumeAndRestore(context, false, resume, true, generation);
+    if (recovering) this.recoveryOwner = pending;
     this.gestureUnlocks.set(event, pending);
     return pending;
   }
@@ -754,12 +818,10 @@ export class WebAudioPcmSink {
       this.liveWorkletProcessors = 0;
       this.retiredContextCount++;
       if (retired.state !== 'closed') {
-        globalThis.setTimeout(() => {
-          void retired.close().catch((error: unknown) => {
-            this.retiredContextCloseFailures++;
-            this.report(error);
-          });
-        }, 500);
+        void retired.close().catch((error: unknown) => {
+          this.retiredContextCloseFailures++;
+          this.report(error);
+        });
       }
     }
     const fresh = this.ensureContext();
@@ -772,18 +834,22 @@ export class WebAudioPcmSink {
     forceResume: boolean,
     resumeRequest: Promise<void> | undefined,
     trustedGesture: boolean,
+    generation = this.recoveryGeneration,
   ): Promise<boolean> {
+    const owned = () => !this.destroyed && this.context === context && generation === this.recoveryGeneration;
+    const recovery = this.lifecycleRecoveryPending;
+    const startedTime = context.currentTime;
     try {
       if (resumeRequest) {
         await resumeRequest;
-        this.trustedResumeResultTimestampMs = Date.now();
+        if (owned()) this.trustedResumeResultTimestampMs = Date.now();
       } else if (forceResume || context.state !== 'running') await context.resume();
-      if (this.context !== context || context.state !== 'running') {
-        if (trustedGesture) this.trustedGestureResumeResult = false;
+      if (!owned() || context.state !== 'running') {
+        if (owned() && trustedGesture) this.trustedGestureResumeResult = false;
         return false;
       }
       for (const state of this.buffers.values()) {
-        if (this.context !== context) return false;
+        if (!owned()) return false;
         if (!state.playing) continue;
         if (state.worklet && context.currentTime - state.workletPositionAt > 1) {
           state.positionBytes = Math.floor(state.streamFrame) * state.format.nBlockAlign;
@@ -792,19 +858,46 @@ export class WebAudioPcmSink {
         if (!state.source && !state.stream && !state.worklet) this.start(state);
         if (state.lifecycleWasLiveStreamed && state.source) {
           await this.startLiveStream(state);
-          if (this.context !== context) return false;
+          if (!owned()) return false;
           state.lifecycleWasLiveStreamed = false;
+        }
+      }
+      if (recovery) {
+        const progress = [...this.buffers.values()]
+          .filter((s) => s.playing)
+          .map((s) => [s, s.rendererProgress] as const);
+        const deadline = performance.now() + 2_000;
+        for (;;) {
+          if (!owned()) return false;
+          const rendering =
+            context.currentTime > startedTime &&
+            progress.every(
+              ([s, before]) =>
+                !s.playing ||
+                !this.buffers.has(s.id) ||
+                (s.worklet || s.stream ? s.rendererProgress > before : s.source !== null),
+            );
+          if (rendering) {
+            this.rendererProgressProven = true;
+            break;
+          }
+          if (performance.now() >= deadline) {
+            this.graphRebuildResult = false;
+            if (trustedGesture) this.trustedGestureResumeResult = false;
+            return false;
+          }
+          await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 20));
         }
       }
       if (trustedGesture) {
         this.lifecycleRecoveryPending = false;
-        this.freshContextPrepared = false;
         this.trustedGestureResumeResult = true;
       }
       this.graphRebuildResult = true;
       this.graphRebuildTimestampMs = Date.now();
       return true;
     } catch (error) {
+      if (!owned()) return false;
       this.graphRebuildResult = false;
       this.graphRebuildTimestampMs = Date.now();
       this.report(error);
@@ -839,10 +932,18 @@ export class WebAudioPcmSink {
     return remove;
   }
 
-  async destroy(): Promise<void> {
+  destroy(): Promise<void> {
+    if (!this.shutdown) this.shutdown = this.destroyAfterSilentBoundary();
+    return this.shutdown;
+  }
+
+  private async destroyAfterSilentBoundary(): Promise<void> {
     if (this.destroyed) return;
     if (this.diagnosticsTimer !== null) globalThis.clearInterval(this.diagnosticsTimer);
     this.diagnosticsTimer = null;
+    if (this.staticCursorTimer !== null) globalThis.clearInterval(this.staticCursorTimer);
+    this.staticCursorTimer = null;
+    await this.suspendForLifecycle();
     this.stopAll();
     this.buffers.clear();
     this.destroyed = true;
@@ -858,7 +959,8 @@ export class WebAudioPcmSink {
   }
 
   private start(state: PcmBufferState): void {
-    if (!state.playing || state.pcm.byteLength === 0) return;
+    if (this.shutdown || !state.playing || state.pcm.byteLength === 0) return;
+    if (this.lifecycleRecoveryPending && this.recoveryGraphGeneration !== this.recoveryGeneration) return;
     const context = this.ensureContext();
     if (!context) return;
     this.startAt(state, context.currentTime);
@@ -913,6 +1015,7 @@ export class WebAudioPcmSink {
         ? {
             control: new SharedArrayBuffer(20),
             generation: this.nextReaderGeneration++,
+            ownershipGeneration: state.ownershipGeneration,
             byteLength: state.pcm.byteLength,
             blockAlign: state.format.nBlockAlign,
             outputSampleRateHz: context.sampleRate,
@@ -972,6 +1075,7 @@ export class WebAudioPcmSink {
     )
       return;
     if (message.live !== undefined) this.liveWorkletProcessors = message.live;
+    if (message.kind === 'position') state.rendererProgress++;
     state.streamFrame = message.frame ?? state.streamFrame;
     state.workletPositionAt = this.context.currentTime;
     state.workletPositionUpdatedAtMs = performance.now();
@@ -980,6 +1084,20 @@ export class WebAudioPcmSink {
       this.workletQuiesceResolvers.get(worklet)?.();
     }
     if (message.kind === 'destroyed') this.workletDestroyResolvers.get(worklet)?.();
+  }
+
+  private async quiesceStaticPlayback(state: PcmBufferState, context: AudioContext | null): Promise<void> {
+    const gain = state.gain?.gain;
+    if (!context || context.state !== 'running' || !gain?.linearRampToValueAtTime) return;
+    const boundary = context.currentTime + 128 / context.sampleRate;
+    gain.cancelScheduledValues(context.currentTime);
+    gain.setValueAtTime(gain.value, context.currentTime);
+    gain.linearRampToValueAtTime(0, boundary);
+    // The envelope is exactly one renderer quantum, independent of lifecycle wall-clock delay.
+    const deadline = performance.now() + 100;
+    while (context.state === 'running' && context.currentTime < boundary && performance.now() < deadline) {
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 4));
+    }
   }
 
   private quiesceWorklet(state: PcmBufferState): Promise<void> {
@@ -1132,6 +1250,7 @@ export class WebAudioPcmSink {
       }
     }
     state.streamFrame = frame;
+    state.rendererProgress++;
     state.positionBytes = Math.min(totalFrames, Math.floor(frame)) * state.format.nBlockAlign;
   }
 
@@ -1172,6 +1291,7 @@ export class WebAudioPcmSink {
       };
       source.start(when, Math.min(frame / state.format.nSamplesPerSec, audio.duration));
       this.activity.sourceStarts++;
+      this.options.onStaticCursor?.(state.id, this.getStreamCursorTrace(state.id)!);
     } catch (error) {
       this.report(error);
     }

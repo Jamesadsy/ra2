@@ -16,6 +16,7 @@ import { SessionGameFileProvider } from '../../src/platform/browser/files/sessio
 import type { GameVmCallbacks } from '../../src/app/session/runtimeEvents';
 import type { VmFrame } from '../../src/vm86/win32';
 import type { VmDiagnosticAction, VmDiagnostics } from '../../src/adapter/vmDiagnostics';
+import { DEFAULT_PCM_FORMAT } from '../../src/vm86/audio';
 
 class FakeProvider implements GameFileProvider {
   readonly label = 'controller-test';
@@ -261,9 +262,15 @@ function frame(value: number): VmFrame {
 
 describe('VmWorkerController request-scoped errors', () => {
   it('reads audio-thread progress atomically and rejects retired or torn cursor generations', async () => {
-    const { controller, core } = harness({ proxyAudio: true });
+    const { controller, core, messages } = harness({ proxyAudio: true });
     await controller.handleMessage({ type: 'init', config: config(), requestId: 71 });
     const audio = core.platform!.audio;
+    audio.createBuffer(42, 16384, { ...DEFAULT_PCM_FORMAT });
+    const created = messages
+      .slice()
+      .reverse()
+      .find((item) => item.type === 'audio' && item.op.op === 'createBuffer');
+    const ownershipGeneration = created?.type === 'audio' ? created.op.ownershipGeneration : undefined;
     const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
     const control = new Int32Array(new SharedArrayBuffer(20));
     control.set([2, 128, 128, 7, 1]);
@@ -271,7 +278,14 @@ describe('VmWorkerController request-scoped errors', () => {
       controller.handleMessage({
         type: 'audio-reader',
         id: 42,
-        reader: { control: value, generation, byteLength: 16384, blockAlign: 4, outputSampleRateHz: 48000 },
+        reader: {
+          control: value,
+          generation,
+          ownershipGeneration,
+          byteLength: 16384,
+          blockAlign: 4,
+          outputSampleRateHz: 48000,
+        },
       } as unknown as MainToWorkerMessage);
     try {
       await bind(7);

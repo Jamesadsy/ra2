@@ -14,6 +14,8 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(lifecycle.phase, .background)
         XCTAssertTrue(lifecycle.webView === webView)
         lifecycle.applicationWillEnterForeground()
+        XCTAssertEqual(lifecycle.phase, .background)
+        lifecycle.applicationDidBecomeActive()
         XCTAssertEqual(lifecycle.phase, .foreground)
         XCTAssertTrue(lifecycle.webView === webView)
     }
@@ -48,6 +50,23 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(startup.isReady)
         XCTAssertTrue(startup.shouldHideStatusSurface)
         XCTAssertEqual(startup.timeoutMode, .completed)
+    }
+
+    func testTransientInactivityAndDuplicateNotificationsHaveOneBackgroundAndActiveEdge() {
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let lifecycle = RuntimeLifecycleCoordinator(webView: webView,
+            diagnostics: RuntimeDiagnosticsLog(userURL: FileManager.default.temporaryDirectory))
+        for _ in 0..<3 {
+            lifecycle.applicationWillResignActive()
+            lifecycle.applicationDidEnterBackground()
+            XCTAssertEqual(lifecycle.phase, .background)
+            lifecycle.applicationWillEnterForeground()
+            XCTAssertEqual(lifecycle.phase, .background)
+            lifecycle.applicationDidBecomeActive()
+            lifecycle.applicationDidBecomeActive()
+            XCTAssertEqual(lifecycle.phase, .foreground)
+            XCTAssertTrue(lifecycle.webView === webView)
+        }
     }
 
     func testStartupPhaseOrderRejectsDuplicatesAndOutOfOrderSignals() {
@@ -142,6 +161,8 @@ final class RuntimeLifecycleTests: XCTestCase {
         ])
         diagnostics.recordWebMetrics([
             "producerCursorUncached": 1,
+            "audioRecoveryGeneration": 3,
+            "audioRendererProgressProven": 1,
             "privateOwnerBytes": "MZ-retail-data-must-not-be-written",
         ])
 
@@ -156,6 +177,8 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(summary.contains("owner/maps02.mix  HTTP 206"))
         XCTAssertTrue(debug.contains("unhandledrejection"))
         XCTAssertTrue(debug.contains("producerCursorUncached=1"))
+        XCTAssertTrue(debug.contains("audioRecoveryGeneration=3"))
+        XCTAssertTrue(debug.contains("audioRendererProgressProven=1"))
         XCTAssertTrue(touch.contains("pointerdown"))
         for value in [summary, debug, touch] {
             XCTAssertFalse(value.contains(token))

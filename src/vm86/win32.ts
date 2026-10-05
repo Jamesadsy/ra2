@@ -521,6 +521,22 @@ const CommonWin32Shim = withOle32(
 );
 
 export class Win32ShimBase extends CommonWin32Shim {
+  /** Scalar media ownership for stalled-guest captures; no PCM, file names, or owner resources. */
+  inspectSpecialMediaState() {
+    const pinnedThread = this.nativeBinkPinnedThread;
+    return {
+      nativeActive: this.nativeBinkPlaybackActive,
+      nativeOpens: this.nativeBinkPlaybackOpens,
+      closeReturnPending: this.nativeBinkThreadReleasePending,
+      pinnedThread,
+      pinnedDepth: pinnedThread === null ? 0 : this.readU32(GUEST_THREAD_CRITICAL_DEPTH + pinnedThread * 4),
+      syntheticHandles: this.binkVideos.size,
+      pendingMediaDeadlines: this.binkNextFrameAt.size,
+      directCallbacks: this.directGuestDllImportStubs.size,
+      ownedSoundBuffers: this.getSoundStreamingTraces().filter((trace) => trace.producerCursorUncached).length,
+    };
+  }
+
   private moviePlaybackTracker: VmMoviePlaybackTracker = {
     lastNonEmptyShellPageTitle: '',
     previousNativeBinkActive: false,

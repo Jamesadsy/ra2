@@ -64,12 +64,28 @@ interface WorkerScope {
   onmessage: ((event: MessageEvent<MainToWorkerMessage>) => void) | null;
 }
 
-class ProxyAudioSink implements VmAudioSink {
+export class ProxyAudioSink implements VmAudioSink {
+  private nextOwnershipGeneration = 1;
+  private readonly ownership = new Map<number, number>();
+  private renewOwnership(id: number): number {
+    const generation = this.nextOwnershipGeneration++;
+    this.ownership.set(id, generation);
+    this.readers.delete(id);
+    this.consumerSamples.delete(id);
+    return generation;
+  }
   private readonly readers = new Map<number, { reader: AudioReader; last: SoundConsumerCursor | null }>();
   private readonly consumerSamples = new Map<number, Extract<MainToWorkerMessage, { type: 'audio-cursor' }>>();
   constructor(private readonly post: VmWorkerControllerDependencies['postMessage']) {}
 
   bindReader(id: number, reader: AudioReader): void {
+    const owner = this.ownership.get(id);
+    if (
+      owner === undefined ||
+      reader.ownershipGeneration !== owner ||
+      Atomics.load(new Int32Array(reader.control), 4) === 0
+    )
+      return;
     const previous = this.readers.get(id);
     if (previous && reader.generation <= previous.reader.generation) return;
     this.consumerSamples.delete(id);
@@ -77,6 +93,10 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   updateConsumerCursor(sample: Extract<MainToWorkerMessage, { type: 'audio-cursor' }>): void {
+    const owner = this.ownership.get(sample.id);
+    // Renderer observations describe live playback. Stop/reset remains guest-owned, including
+    // a current-lifetime stopped packet sent while SetCurrentPosition is still in transit.
+    if (owner === undefined || sample.ownershipGeneration !== owner || !sample.playing) return;
     const previous = this.consumerSamples.get(sample.id);
     this.consumerSamples.set(sample.id, {
       ...sample,
@@ -94,7 +114,10 @@ class ProxyAudioSink implements VmAudioSink {
     if (!sample || !sample.byteLength || !sample.blockAlign) return null;
     const ageMs = Math.max(0, Date.now() - sample.observedAtEpochMs);
     if (ageMs > 250) return null;
-    const advanced = sample.playing ? Math.floor((ageMs * sample.frequency) / 1000) * sample.blockAlign : 0;
+    const advanced =
+      sample.playing && sample.renderClockProgressing !== false
+        ? Math.floor((ageMs * sample.frequency) / 1000) * sample.blockAlign
+        : 0;
     const aligned = Math.floor((sample.positionBytes + advanced) / sample.blockAlign) * sample.blockAlign;
     return {
       positionBytes: aligned % sample.byteLength,
@@ -105,20 +128,19 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   createBuffer(id: number, byteLength: number, format: PcmWaveFormat): void {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
-    this.post({ type: 'audio', op: { op: 'createBuffer', id, byteLength, format } });
+    const ownershipGeneration = this.renewOwnership(id);
+    this.post({ type: 'audio', op: { op: 'createBuffer', id, byteLength, format, ownershipGeneration } });
   }
 
   duplicateBuffer(sourceId: number, destinationId: number): boolean {
-    this.post({ type: 'audio', op: { op: 'duplicateBuffer', sourceId, destinationId } });
+    const ownershipGeneration = this.renewOwnership(destinationId);
+    this.post({ type: 'audio', op: { op: 'duplicateBuffer', sourceId, destinationId, ownershipGeneration } });
     return true;
   }
 
   setFormat(id: number, format: PcmWaveFormat): boolean {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
-    this.post({ type: 'audio', op: { op: 'setFormat', id, format } });
+    const ownershipGeneration = this.renewOwnership(id);
+    this.post({ type: 'audio', op: { op: 'setFormat', id, format, ownershipGeneration } });
     return true;
   }
 
@@ -129,14 +151,13 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   play(id: number, options: PcmPlayOptions = {}): boolean {
-    this.post({ type: 'audio', op: { op: 'play', id, options } });
+    this.post({ type: 'audio', op: { op: 'play', id, options, ownershipGeneration: this.ownership.get(id) } });
     return true;
   }
 
   stop(id: number): boolean {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
-    this.post({ type: 'audio', op: { op: 'stop', id } });
+    const ownershipGeneration = this.renewOwnership(id);
+    this.post({ type: 'audio', op: { op: 'stop', id, ownershipGeneration } });
     return true;
   }
 
@@ -169,8 +190,9 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   releaseBuffer(id: number): boolean {
-    this.readers.delete(id);
-    this.consumerSamples.delete(id);
+    this.renewOwnership(id);
+    // Absence rejects old nonzero lifetimes; no tombstone is needed for a released address.
+    this.ownership.delete(id);
     this.post({ type: 'audio', op: { op: 'releaseBuffer', id } });
     return true;
   }
@@ -180,12 +202,15 @@ class ProxyAudioSink implements VmAudioSink {
   }
 
   stopAll(): void {
+    // Deliver the same renewed lifetime to the main-thread owner before any later Play.
+    for (const id of this.ownership.keys()) this.stop(id);
     this.post({ type: 'audio-control', action: 'stop-all' });
   }
 
   async destroy(): Promise<void> {
     this.readers.clear();
     this.consumerSamples.clear();
+    this.ownership.clear();
     this.post({ type: 'audio-control', action: 'destroy' });
   }
 }
