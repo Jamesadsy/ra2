@@ -9,6 +9,9 @@ import type { PreviewServer, ViteDevServer } from 'vite';
 import { createGameRelay } from 'relay-package/server';
 import { parseRelayFaultConfig } from 'relay-package/faults';
 import { createThirdPartyCacheHandler } from './src/server/thirdPartyCache';
+import { createEa108DevOwnerSourceHandler, isEa108DevOwnerSourceEnabled } from './src/server/ea108DevOwnerSource';
+import { EA108_RA2_OWNER_EXECUTABLE } from './src/games/ra2/ea108Identity';
+import { randomBytes } from 'node:crypto';
 
 type ViteHttpServer = NonNullable<ViteDevServer['httpServer']> | NonNullable<PreviewServer['httpServer']>;
 
@@ -17,6 +20,33 @@ type ViteHttpServer = NonNullable<ViteDevServer['httpServer']> | NonNullable<Pre
  * For example, fetch('/game/Title.bmp') reads the original data file without copying assets.
  */
 const GAME_DIR = resolve(process.env.RA2_GAME_ROOT || fileURLToPath(new URL('./game', import.meta.url)));
+const EA108_DEV_OWNER_SOURCE_ENABLED = isEa108DevOwnerSourceEnabled(process.env);
+
+function ea108DevOwnerSourcePlugin(): Plugin {
+  return {
+    name: 'ra2:ea108-dev-owner-source',
+    apply: 'serve',
+    configResolved(config) {
+      if (EA108_DEV_OWNER_SOURCE_ENABLED && config.server.host !== '127.0.0.1') {
+        throw new Error('EA 1.08 owner-source diagnostics require Vite to bind exactly to 127.0.0.1.');
+      }
+    },
+    configureServer(server) {
+      if (!EA108_DEV_OWNER_SOURCE_ENABLED) return;
+      const ownerDataDirectory = process.env.RA2_EA108_OWNER_DATA_DIR;
+      if (!ownerDataDirectory)
+        throw new Error('RA2_EA108_OWNER_DATA_DIR is required for the opted-in local source route.');
+      server.middlewares.use(
+        createEa108DevOwnerSourceHandler({
+          ownerDataDirectory,
+          token: randomBytes(32).toString('hex'),
+          expectedExecutableSha256: EA108_RA2_OWNER_EXECUTABLE.sha256,
+          expectedExecutableSize: EA108_RA2_OWNER_EXECUTABLE.size,
+        }),
+      );
+    },
+  };
+}
 
 function gameAssetsPlugin(): Plugin {
   return {
@@ -184,7 +214,7 @@ function isWithinGameDirectory(candidate: string): boolean {
 }
 
 export default defineConfig({
-  plugins: [basicSsl(), gameAssetsPlugin(), ra2NetworkRelayPlugin()],
+  plugins: [basicSsl(), ea108DevOwnerSourcePlugin(), gameAssetsPlugin(), ra2NetworkRelayPlugin()],
   // VM pages with hmr=false cannot rely on reloads to handle a second prebundle. Register JSX and Worker dynamic dependencies
   // up front to avoid a second React instance in lazy pages. This only builds development caches; browser experiments are not preloaded.
   optimizeDeps: {
@@ -201,7 +231,8 @@ export default defineConfig({
     ],
   },
   server: {
-    host: true, // Listen on 0.0.0.0 so other LAN devices can connect (the terminal prints the Network address)
+    // The private EA 1.08 source lane is never exposed beyond this machine.
+    host: EA108_DEV_OWNER_SOURCE_ENABLED ? '127.0.0.1' : true, // Normal development remains available to LAN devices.
     port: 15174,
     strictPort: true,
     // VMs and long regressions are stateful; code changes must not reload pages or destroy VMs under test.

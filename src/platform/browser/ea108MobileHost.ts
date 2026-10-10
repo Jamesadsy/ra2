@@ -5,8 +5,19 @@ import { ScopedGameFileProvider } from '../../resources/providers/scoped';
 import type { GameFileProvider } from '../../resources/contracts';
 import { sha256Hex } from '../../utils/sha256';
 import { reportNativeRuntimePhase } from './nativeDiagnostics';
+import { EA108_RA2_OWNER_EXECUTABLE } from '../../games/ra2/ea108Identity';
 
-export const EA108_RA2_EXECUTABLE_SHA256 = '6fc4b410f8841ba3ad6c57b59fccae65f58a8871d86750af3c1e2d5a7c5ad39d';
+export const EA108_RA2_EXECUTABLE_SHA256 = EA108_RA2_OWNER_EXECUTABLE.sha256;
+
+/** True only for an explicit local development launch on a loopback browser origin. */
+export function isEa108DevOwnerSourceOptedIn(
+  location: Pick<Location, 'hostname' | 'protocol' | 'search'> = window.location,
+): boolean {
+  if (!import.meta.env.DEV) return false;
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return false;
+  if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') return false;
+  return new URLSearchParams(location.search).get('ea108-local-owner') === '1';
+}
 
 /** Files needed for the original RA2 frontend, both campaign maps, briefing media, and music. */
 export const EA108_RA2_M1_REQUIRED_FILES = [

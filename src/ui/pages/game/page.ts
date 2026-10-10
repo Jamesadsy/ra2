@@ -40,7 +40,11 @@ import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import { initialGameResolution, loadStoredResolution } from './vmPageResolution';
 import { createIosTapToStartGate } from './iosTapToStartGate';
 import type { GameResolution } from '../../../games/resolution';
-import { isEa108IosHost, loadEa108IosOwnerGameSource } from '../../../platform/browser/ea108MobileHost';
+import {
+  isEa108DevOwnerSourceOptedIn,
+  isEa108IosHost,
+  loadEa108IosOwnerGameSource,
+} from '../../../platform/browser/ea108MobileHost';
 import { installRuntimeLifecycleCoordinator } from '../../../adapter/runtimeLifecycleCoordinator';
 import {
   reportNativeRuntimeError,
@@ -384,6 +388,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   // missing/incomplete caches, such as quota-reduced sets, return to the picker.
   if (isEa108IosHost()) {
     gameSource = await loadEa108IosOwnerGameSource();
+  } else if (import.meta.env.DEV && isEa108DevOwnerSourceOptedIn()) {
+    const { loadEa108DevOwnerGameSource } = await import('../../../platform/browser/ea108DevOwnerSource');
+    gameSource = await loadEa108DevOwnerGameSource();
   } else {
     const cachedSource = await restoreCachedGameSource().catch(() => null);
     if (generation !== pageGeneration) return;

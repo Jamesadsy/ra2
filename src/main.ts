@@ -7,7 +7,7 @@ import { AppShell } from './ui/pages/game/AppShell';
 import { createRoot } from 'react-dom/client';
 import { UiErrorBoundary } from './ui/shared/components/UiErrorBoundary';
 import { showEdgeMouseNotice } from './ui/pages/game/components/edgeMouseNotice';
-import { isEa108IosHost } from './platform/browser/ea108MobileHost';
+import { isEa108DevOwnerSourceOptedIn, isEa108IosHost } from './platform/browser/ea108MobileHost';
 import { installNativeTouchDiagnostics, reportNativeRuntimeEvent } from './platform/browser/nativeDiagnostics';
 import { controlsCollapsed } from './ui/pages/game/state/uiState';
 
@@ -21,7 +21,8 @@ if (isEa108IosHost()) {
 }
 
 // Run alongside page-module initialization without waiting for package selection; startup reuses the cache or the same in-flight request.
-if (!isEa108IosHost()) void preloadThirdPartyFiles(Object.values(GAME_MANIFESTS));
+if (!isEa108IosHost() && !(import.meta.env.DEV && isEa108DevOwnerSourceOptedIn()))
+  void preloadThirdPartyFiles(Object.values(GAME_MANIFESTS));
 
 // Page-lifetime navigation guard: keep accidental back/forward, mouse-side-button, and Alt+Left navigation on this page
 // (disable with ?nav-guard=0 for development). Install once, independently of VM lifetime.
