@@ -129,6 +129,7 @@ export class VmCore {
   private readonly pendingFileWrites = new Set<Promise<void>>();
   private pendingFileWriteError: Error | null = null;
   private gameClockRate = 1;
+  private executableHash = '';
   private frameReader: Promise<GameFrameReader | null> | null = null;
   private readonly gamePerformance = new GamePerformanceMeter();
   private guestMemoryBytes = DEFAULT_GUEST_MEMORY_SIZE;
@@ -181,6 +182,8 @@ export class VmCore {
     try {
       this.source = await this.platform.resourcePolicy.prepareSource(this.source);
       const { game, files: gameFiles, executableBytes: exe } = this.source;
+      const { sha256Hex } = await import('../utils/sha256');
+      this.executableHash = await sha256Hex(exe);
       const guestMemoryBytes = game.guestMemoryBytes ?? DEFAULT_GUEST_MEMORY_SIZE;
       this.guestMemoryBytes = guestMemoryBytes;
       this.status('loading', `读取原版 ${game.executable} 和 VM 固件…`);
@@ -245,12 +248,11 @@ export class VmCore {
       // Write only the two used regions instead of copying an entire empty 64MB image into WASM.
       emulator.write_memory(staging.subarray(HYPERCALL_STACK, stubNext), HYPERCALL_STACK);
       emulator.write_memory(staging.subarray(image.imageBase, image.imageBase + image.sizeOfImage), image.imageBase);
-      game.runtimeHooks?.prepareImage?.(emulator);
+      game.runtimeHooks?.prepareImage?.(emulator, this.executableHash);
       if (this.platform.startupPage) {
         const prepare = game.runtimeHooks?.prepareStartupPage;
         if (!prepare) throw new Error(`${game.id} 尚不支持启动页面直达`);
-        const { sha256Hex } = await import('../utils/sha256');
-        prepare(emulator, this.platform.startupPage, await sha256Hex(exe), (size) => {
+        prepare(emulator, this.platform.startupPage, this.executableHash, (size) => {
           const address = stubNext;
           if (!Number.isInteger(size) || size <= 0 || address + size > STUB_LIMIT) throw new Error('启动导航桩区不足');
           stubNext = (address + size + 15) & ~15;
@@ -445,7 +447,7 @@ export class VmCore {
 
   postMessage(message: number, wParam = 0, lParam = 0): void {
     if (!this.emulator || !this.shim) return;
-    this.source.game.runtimeHooks?.beforeHostMessage?.(this.emulator, message);
+    this.source.game.runtimeHooks?.beforeHostMessage?.(this.emulator, message, this.executableHash);
     this.shim.postMessage(message, wParam, lParam);
   }
 
@@ -478,10 +480,9 @@ export class VmCore {
     const create = this.source.game.runtimeHooks?.createFrameReader;
     if (!emulator || !this.image || !create || this.currentPhase === 'loading') return null;
     // Verify the EXE only on the first explicit sample; do not add per-frame hooks or timers to normal runs.
-    this.frameReader ??= import('../utils/sha256').then(async ({ sha256Hex }) => {
-      const hash = await sha256Hex(this.source.executableBytes);
-      return this.emulator === emulator ? create(emulator, hash) : null;
-    });
+    this.frameReader ??= Promise.resolve(this.executableHash).then((hash) =>
+      this.emulator === emulator ? create(emulator, hash) : null,
+    );
     const reader = await this.frameReader;
     if (this.emulator !== emulator) return null;
     const counters = reader?.();
@@ -523,7 +524,7 @@ export class VmCore {
   setGameSpeedFlag(value: number): number | null {
     const hooks = this.source.game.runtimeHooks;
     if (!this.emulator || !hooks?.writeGameSpeedFlag) return null;
-    return hooks.writeGameSpeedFlag(this.emulator, value);
+    return hooks.writeGameSpeedFlag(this.emulator, value, this.executableHash);
   }
 
   /** Memory-change recording: snapshot current guest RAM as the baseline and start periodic sampling counts. */
@@ -663,7 +664,7 @@ export class VmCore {
       const heap = this.shim.inspectHeapState();
       const callback = this.shim.inspectCallbackState();
       const knownHint =
-        runtimeHooks?.crashHint?.(vector, eip) ||
+        runtimeHooks?.crashHint?.(vector, eip, this.executableHash) ||
         (vector === 0 ? '；除零异常：游戏内除法以 0 为除数，通常伴随数据文件缺失或读取失败' : '');
       this.status(
         'error',

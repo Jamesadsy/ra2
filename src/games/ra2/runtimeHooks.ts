@@ -4,6 +4,7 @@ import { readF64, readU32, writeF64 } from '../shared/guestMemoryIO';
 import { writeGameSpeedFlag } from '../shared/gameSpeedFlag';
 import { skipStartupMovieBlock } from '../shared/startupMovieSkip';
 import { createRa2FrameReader } from './performance';
+import { RA2_STARTUP_PAGE_HASH } from './startupPage';
 import { patchRa2ShortGame } from './shortGame';
 import { installRa2BattleStartup } from './battleStartup';
 import { installRa2LanStartup, installRa2SkirmishStartup } from './startupPage';
@@ -100,14 +101,22 @@ export const RA2_RUNTIME_HOOKS: GameRuntimeHooks = Object.freeze({
     if (page !== 'skirmish') throw new Error(`RA2 尚不支持直达页面：${page}`);
     installRa2SkirmishStartup(memory, reserve, hash);
   },
-  prepareImage(memory: GuestMemory): void {
+  prepareImage(memory: GuestMemory, executableSha256?: string): void {
+    if (executableSha256 !== RA2_STARTUP_PAGE_HASH) return;
     skipRa2StartupMovies(memory);
     shortenRa2CpuCalibration(memory);
     patchRa2ShortGame(memory);
   },
-  beforeHostMessage: repairRa2InvalidRepairRate,
-  writeGameSpeedFlag: writeRa2GameSpeed,
-  crashHint(vector: number, eip: number): string {
+  beforeHostMessage(memory: GuestMemory, message: number, executableSha256?: string): void {
+    if (executableSha256 !== RA2_STARTUP_PAGE_HASH) return;
+    repairRa2InvalidRepairRate(memory, message);
+  },
+  writeGameSpeedFlag(memory: GuestMemory, value: number, executableSha256?: string): number | null {
+    if (executableSha256 !== RA2_STARTUP_PAGE_HASH) return null;
+    return writeRa2GameSpeed(memory, value);
+  },
+  crashHint(vector: number, eip: number, executableSha256?: string): string {
+    if (executableSha256 !== RA2_STARTUP_PAGE_HASH) return '';
     // SwizzleManager's missing old-pointer mapping branch deliberately divides by zero.
     // Saves from the former OleSaveToStream success stub omit object data; loading them
     // in a fresh process reproduces this address even with all installation assets present.

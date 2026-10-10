@@ -6,6 +6,8 @@ import {
   skipRa2StartupMovies,
   writeRa2GameSpeed,
 } from '../../src/games/ra2/runtimeHooks';
+import { RA2_108_PERFORMANCE_HASH } from '../../src/games/ra2/performance';
+import { RA2_STARTUP_PAGE_HASH } from '../../src/games/ra2/startupPage';
 import { createGuestMemory, readU32, writeU32, type FakeGuestMemory } from '../helpers/guestMemory';
 
 const RULES_POINTER = 0x0083_9848;
@@ -32,16 +34,16 @@ function readF64(memory: FakeGuestMemory, address: number): number {
 
 describe('RA2 运行态护栏', () => {
   it('identifies save reference restoration failures without misdiagnosing missing installation assets', () => {
-    expect(RA2_RUNTIME_HOOKS.crashHint!(0, 0x0069_fcbd)).toContain('存档对象引用恢复失败');
-    expect(RA2_RUNTIME_HOOKS.crashHint!(13, 0x0069_fcbd)).toBe('');
-    expect(RA2_RUNTIME_HOOKS.crashHint!(0, 0x0069_fcbe)).toBe('');
+    expect(RA2_RUNTIME_HOOKS.crashHint!(0, 0x0069_fcbd, RA2_STARTUP_PAGE_HASH)).toContain('存档对象引用恢复失败');
+    expect(RA2_RUNTIME_HOOKS.crashHint!(13, 0x0069_fcbd, RA2_STARTUP_PAGE_HASH)).toBe('');
+    expect(RA2_RUNTIME_HOOKS.crashHint!(0, 0x0069_fcbe, RA2_STARTUP_PAGE_HASH)).toBe('');
   });
   it('RA2 启动缩短测速时长及轮数，保留函数其余字节且可重复应用', () => {
     const memory = createGuestMemory();
     writeCpuCalibration(memory);
     const original = memory.read_memory(0x005a_bf70, 0x200).slice();
 
-    RA2_RUNTIME_HOOKS.prepareImage!(memory);
+    RA2_RUNTIME_HOOKS.prepareImage!(memory, RA2_STARTUP_PAGE_HASH);
 
     const expected = original.slice();
     new DataView(expected.buffer).setUint32(0x5abfef - 0x5abf70, 100, true);
@@ -50,6 +52,29 @@ describe('RA2 运行态护栏', () => {
     expect(memory.read_memory(0x005a_bf70, 0x200)).toEqual(expected);
     expect(shortenRa2CpuCalibration(memory)).toBe(true);
     expect(memory.read_memory(0x005a_bf70, 0x200)).toEqual(expected);
+  });
+
+  it('keeps all 1.006 image, input-repair, and speed-write hooks closed for EA 1.08', () => {
+    const memory = createGuestMemory();
+    writeCpuCalibration(memory);
+    const movieAddress = 0x0051_263c;
+    memory.write_memory(new Uint8Array([0xe8, 0x8f, 0x6c, 0xef, 0xff]), movieAddress);
+    const calibration = memory.read_memory(0x005a_bf70, 0x200).slice();
+    const movie = memory.read_memory(movieAddress, 5).slice();
+    writeU32(memory, RULES_POINTER, RULES);
+    writeF64(memory, REPAIR_RATE, 0);
+    const speedAddress = RULES + 0x1108;
+    writeU32(memory, speedAddress, 3);
+
+    RA2_RUNTIME_HOOKS.prepareImage!(memory, RA2_108_PERFORMANCE_HASH);
+    RA2_RUNTIME_HOOKS.beforeHostMessage!(memory, 0x0202, RA2_108_PERFORMANCE_HASH);
+
+    expect(memory.read_memory(0x005a_bf70, 0x200)).toEqual(calibration);
+    expect(memory.read_memory(movieAddress, 5)).toEqual(movie);
+    expect(readF64(memory, REPAIR_RATE)).toBe(0);
+    expect(RA2_RUNTIME_HOOKS.writeGameSpeedFlag!(memory, 6, RA2_108_PERFORMANCE_HASH)).toBeNull();
+    expect(readU32(memory, speedAddress)).toBe(3);
+    expect(RA2_RUNTIME_HOOKS.crashHint!(0, 0x0069_fcbd, RA2_108_PERFORMANCE_HASH)).toBe('');
   });
 
   it.each([0x005a_bf70, 0x005a_bfee, 0x005a_c006, 0x005a_c0a9])('测速签名 0x%s 不匹配时不留下部分补丁', (address) => {

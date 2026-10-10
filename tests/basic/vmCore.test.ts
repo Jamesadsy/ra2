@@ -9,6 +9,7 @@ import { EMPTY_GAME_SHIM_PROFILE } from '../../src/vm86/shim/gameProfile';
 import type { V86 } from 'v86';
 import type { Win32Shim } from '../../src/games/win32Shim';
 import { HYPERCALL_EXCEPTION, HYPERCALL_HALTED, HYPERCALL_REQUEST, HYPERCALL_STACK } from '../../src/vm86/pe';
+import { sha256Hex } from '../../src/utils/sha256';
 import { FIXTURE_FILE_BYTES, FIXTURE_FILE_PATH, FIXTURE_ABI, buildFixturePe } from '../fixture/fixtureProgram';
 
 class FakeAudio implements VmAudioSink {
@@ -151,6 +152,25 @@ function writeU32(emulator: FakeEmulator, address: number, value: number): void 
 }
 
 describe('VmCore lifecycle orchestration', () => {
+  it('passes the hash of the selected executable to image preparation before the guest entry runs', async () => {
+    const emulator = new FakeEmulator();
+    const fixture = source();
+    const prepareImage = vi.fn();
+    fixture.game = { ...fixture.game, runtimeHooks: { prepareImage } };
+    const core = new VmCore(
+      {},
+      fixture,
+      platform(emulator, new FakeAudio(), () => fakeShim()),
+    );
+    try {
+      await core.start();
+      expect(prepareImage).toHaveBeenCalledOnce();
+      expect(prepareImage).toHaveBeenCalledWith(emulator, await sha256Hex(fixture.executableBytes));
+    } finally {
+      await core.destroy();
+    }
+  });
+
   it('keeps the v86 instance running through a lifecycle pause and does not round-trip stop/run', async () => {
     const emulator = new FakeEmulator();
     const shim = Object.assign(fakeShim(), {
