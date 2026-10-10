@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { GamePerformanceMeter } from '../../src/adapter/gamePerformance';
-import { createRa2FrameReader } from '../../src/games/ra2/performance';
+import { createRa2FrameReader, RA2_108_PERFORMANCE_HASH } from '../../src/games/ra2/performance';
 import { createYrFrameReader } from '../../src/games/yr/performance';
 import { RA2_STARTUP_PAGE_HASH } from '../../src/games/ra2/startupPage';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
@@ -39,6 +39,49 @@ it.each(profiles)('帧计数仅接受自己的 EXE 和指令签名，采样不�
   expect(write).not.toHaveBeenCalled();
   memory.write_memory([0x90], p.site);
   expect(p.create(memory, p.hash)).toBeNull();
+});
+it('RA2 EA 1.08 diagnostics require the exact executable hash and native frame signature', () => {
+  const memory = createGuestMemory();
+  const signature = [
+    0x8b, 0x15, 0x2c, 0x0d, 0xa4, 0, 0xa1, 0x74, 0x91, 0xab, 0, 0x42, 0x3b, 0xc7, 0x89, 0x15, 0x2c, 0x0d, 0xa4, 0,
+  ];
+  memory.write_memory(signature, 0x540676);
+  writeU32(memory, 0xa40d2c, 1234);
+  writeU32(memory, 0xa40b18, 2);
+  writeU32(memory, 0xa3d2c8, 3);
+  writeU32(memory, 0xa3d568, 60);
+
+  const read = vi.spyOn(memory, 'read_memory');
+  const write = vi.spyOn(memory, 'write_memory');
+  const reader = createRa2FrameReader(memory, RA2_108_PERFORMANCE_HASH);
+  expect(reader?.()).toEqual({ frame: 1234, gameSpeed: 2, sessionSpeed: 3, requestedFps: 60 });
+  expect(read).toHaveBeenCalledWith(0x540676, signature.length);
+  expect(write).not.toHaveBeenCalled();
+
+  read.mockClear();
+  expect(createRa2FrameReader(memory, '0000000000000000000000000000000000000000000000000000000000000000')).toBeNull();
+  expect(read).not.toHaveBeenCalled();
+
+  memory.write_memory([0x90], 0x540676);
+  expect(createRa2FrameReader(memory, RA2_108_PERFORMANCE_HASH)).toBeNull();
+});
+it('RA2 EA 1.08 diagnostics fail closed when signature or sampled memory reads fail', () => {
+  const unreadableSignature = createGuestMemory();
+  vi.spyOn(unreadableSignature, 'read_memory').mockImplementation(() => {
+    throw new Error('unreadable signature');
+  });
+  expect(createRa2FrameReader(unreadableSignature, RA2_108_PERFORMANCE_HASH)).toBeNull();
+
+  const memory = createGuestMemory();
+  memory.write_memory(
+    [0x8b, 0x15, 0x2c, 0x0d, 0xa4, 0, 0xa1, 0x74, 0x91, 0xab, 0, 0x42, 0x3b, 0xc7, 0x89, 0x15, 0x2c, 0x0d, 0xa4, 0],
+    0x540676,
+  );
+  const reader = createRa2FrameReader(memory, RA2_108_PERFORMANCE_HASH);
+  vi.spyOn(memory, 'read_memory').mockImplementation(() => {
+    throw new Error('unreadable sample');
+  });
+  expect(reader?.()).toBeNull();
 });
 const counters = (frame: number) => ({ frame, gameSpeed: 0, sessionSpeed: 0, requestedFps: 60 });
 it('目标 60 不冒充实际 FPS；停滞为零，菜单/重置/同时间不产生假峰值', () => {
