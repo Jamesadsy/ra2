@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { request } from 'node:https';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { join, resolve } from 'node:path';
 import { chromium, type Locator, type Page } from '@playwright/test';
 import { assessBriefingAudioHealth } from './briefingAudioHealth';
@@ -27,9 +28,11 @@ const WIDE_GUEST =
   Number.isFinite(EXPECTED_GUEST_HEIGHT) &&
   EXPECTED_GUEST_WIDTH! / EXPECTED_GUEST_HEIGHT! > 1.6;
 const EVIDENCE_DIR = process.env.RA2_BROWSER_EVIDENCE_DIR;
+const OWNER_SOURCE_MODE = process.env.RA2_BROWSER_OWNER_SOURCE === '1';
 const PRESENTATION_ONLY = process.env.RA2_BROWSER_PRESENTATION_ONLY === '1';
 const LIFECYCLE_ONLY = process.env.RA2_BROWSER_LIFECYCLE_ONLY === '1';
-const CAMPAIGN_SELECTION_ONLY = process.env.RA2_BROWSER_CAMPAIGN_SELECTION_ONLY === '1';
+const CAMPAIGN_TIMELINE_ONLY = process.env.RA2_BROWSER_CAMPAIGN_TIMELINE_ONLY === '1';
+const CAMPAIGN_SELECTION_ONLY = process.env.RA2_BROWSER_CAMPAIGN_SELECTION_ONLY === '1' || CAMPAIGN_TIMELINE_ONLY;
 const CAMPAIGN_CHOICE = process.env.RA2_BROWSER_CAMPAIGN_CHOICE;
 const CAMPAIGN_ENTRY_PROOF_ONLY = process.env.RA2_BROWSER_CAMPAIGN_ENTRY_PROOF_ONLY === '1';
 const SKIP_BRIEFING_WITH_LONG_PRESS = process.env.RA2_BROWSER_SKIP_BRIEFING === '1';
@@ -83,6 +86,86 @@ async function readAudioProgress(page: Page): Promise<AudioProgressProbe | null>
   });
 }
 
+interface CampaignTimelineRow {
+  capturedAt: string;
+  hostElapsedMs: number;
+  browserMonotonicMs: number;
+  canvasFrame: number | null;
+  frameSample: string | null;
+  shell: string | null;
+  moviePlayback: string | null;
+  moviePlaybackState: string | null;
+  resolution: string | null;
+  battlefield: string | null;
+  vmStatus: string | null;
+  binkCalls: Record<string, number>;
+  directSoundCalls: Record<string, number>;
+  directSoundPlayDelta: number;
+  audio: AudioProgressProbe | null;
+}
+
+async function readCampaignTimelineRow(
+  page: Page,
+): Promise<Omit<CampaignTimelineRow, 'hostElapsedMs' | 'directSoundPlayDelta'>> {
+  return page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>('#screen');
+    if (!canvas) throw new Error('RA2 screen canvas disappeared during the campaign timeline capture.');
+    const parseCalls = (raw: string | undefined): Record<string, number> => {
+      try {
+        return JSON.parse(raw ?? '{}') as Record<string, number>;
+      } catch {
+        return {};
+      }
+    };
+    const audioProbe = (window as Window & { __RA2AudioProgressProbe?: () => AudioProgressProbe })
+      .__RA2AudioProgressProbe;
+    return {
+      capturedAt: new Date().toISOString(),
+      browserMonotonicMs: performance.now(),
+      canvasFrame: canvas.dataset.vmFrame ? Number(canvas.dataset.vmFrame) : null,
+      frameSample: canvas.dataset.vmFrameSample ?? null,
+      shell: canvas.dataset.shellPage ?? null,
+      moviePlayback: canvas.dataset.moviePlayback ?? null,
+      moviePlaybackState: canvas.dataset.moviePlaybackState ?? null,
+      resolution: canvas.dataset.vmResolution ?? null,
+      battlefield: canvas.dataset.vmBattlefield ?? null,
+      vmStatus: canvas.dataset.vmStatus ?? null,
+      binkCalls: parseCalls(canvas.dataset.vmBinkCalls),
+      directSoundCalls: parseCalls(canvas.dataset.vmAudioCalls),
+      audio: audioProbe?.() ?? null,
+    };
+  });
+}
+
+async function beginNativePerformanceCapture(page: Page): Promise<void> {
+  const toolbar = page.locator('#vm-performance-diagnostics');
+  await toolbar.waitFor({ state: 'visible', timeout: 10_000 });
+  await toolbar.evaluate((element) => (element as HTMLButtonElement).click());
+  const dialog = page.locator('.performance-diagnostics');
+  await dialog.waitFor({ state: 'visible', timeout: 5_000 });
+  const start = dialog.getByRole('button', { name: '开始 20 秒采样', exact: true });
+  assert.equal(
+    await start.isDisabled(),
+    false,
+    'Native performance sampling is unavailable in the campaign battlefield.',
+  );
+  await start.evaluate((element) => (element as HTMLButtonElement).click());
+  await dialog.waitFor({ state: 'hidden', timeout: 5_000 });
+}
+
+async function finishNativePerformanceCapture(page: Page): Promise<Record<string, unknown>> {
+  await page.waitForFunction(
+    () => {
+      const report = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="性能诊断报告"]');
+      return (report?.value.trim().length ?? 0) > 0;
+    },
+    undefined,
+    { timeout: 30_000 },
+  );
+  const reportText = await page.locator('textarea[aria-label="性能诊断报告"]').inputValue();
+  return JSON.parse(reportText) as Record<string, unknown>;
+}
+
 async function captureGuestFrame(page: Page, filename: string): Promise<void> {
   await page.evaluate(() => {
     const captureWindow = window as Window & { __RA2CaptureGuestFrame?: boolean; __RA2CapturedGuestFrame?: string };
@@ -118,7 +201,10 @@ async function captureGuestFrame(page: Page, filename: string): Promise<void> {
 
 function serverReady(): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = request(ORIGIN, { rejectUnauthorized: false }, (response) => {
+    const origin = new URL(ORIGIN);
+    const request = origin.protocol === 'https:' ? httpsRequest : httpRequest;
+    const options = origin.protocol === 'https:' ? { rejectUnauthorized: false } : {};
+    const req = request(ORIGIN, options, (response) => {
       response.resume();
       resolve((response.statusCode ?? 500) < 500);
     });
@@ -453,6 +539,7 @@ async function probeCampaignVideo(
   closesBefore: number,
   audioBefore: Record<string, number>,
   binkBefore: Record<string, number>,
+  continueAfterAudioObservationFailure = false,
 ): Promise<void> {
   try {
     await page.waitForFunction(
@@ -593,13 +680,20 @@ async function probeCampaignVideo(
     maxBinkWaitCalls < 100,
     `战役过场 BinkWait 仍在宿主 hypercall 自旋：最高 ${maxBinkWaitCalls}/500ms，总调用 ${maxBatchCalls}/500ms`,
   );
-  assert(
-    audioHealth.passed,
-    `战役 briefing 音频未通过实际进度/非 runaway 健康契约：` +
-      `context=${audioContextState}，时钟Δ=${audioHealth.audioClockDeltaSeconds.toFixed(3)}s，` +
-      `推进缓冲=${advancingBufferIds.length}，游标查询=${audioHealth.cursorPollsPerAudioSecond.toFixed(0)}/音频秒，` +
-      `失败=${audioHealth.failures.join(',')}`,
-  );
+  if (!audioHealth.passed && continueAfterAudioObservationFailure) {
+    console.log(
+      `Campaign briefing audio observation did not pass the optional health gate; retaining measurements and continuing ` +
+        `without changing DirectSound or simulation timing: ${JSON.stringify(audioHealth)}`,
+    );
+  } else {
+    assert(
+      audioHealth.passed,
+      `战役 briefing 音频未通过实际进度/非 runaway 健康契约：` +
+        `context=${audioContextState}，时钟Δ=${audioHealth.audioClockDeltaSeconds.toFixed(3)}s，` +
+        `推进缓冲=${advancingBufferIds.length}，游标查询=${audioHealth.cursorPollsPerAudioSecond.toFixed(0)}/音频秒，` +
+        `失败=${audioHealth.failures.join(',')}`,
+    );
+  }
   const buffersBefore = audioBefore['DSOUND.COM!IDirectSound.CreateSoundBuffer'] ?? 0;
   const buffersAfter = audioAfter['DSOUND.COM!IDirectSound.CreateSoundBuffer'] ?? 0;
   const playsBefore = audioBefore['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
@@ -672,6 +766,11 @@ async function clickGuest(page: Page, canvas: Locator, x: number, y: number): Pr
   await page.mouse.down();
   await page.waitForTimeout(200);
   await page.mouse.up();
+}
+
+/** The original RA2 campaign artwork is an 800x600 panel centered in larger guest modes. */
+function campaignMenuGuestPoint(x: number, y: number, width: number, height: number): [number, number] {
+  return [Math.round(x + (width - 800) / 2), Math.round(y + (height - 600) / 2)];
 }
 
 async function dispatchTouchLongPress(page: Page, canvas: Locator): Promise<void> {
@@ -753,6 +852,167 @@ async function waitForPlayableBattle(
     `等待可操作战场超时：右栏=${lastSignal.rightEdgeRatio.toFixed(3)}，` +
       `地图=${lastSignal.fieldRatio.toFixed(3)}，帧=${lastSignal.frame}`,
   );
+}
+
+async function collectCampaignTimeline(
+  page: Page,
+  canvas: Locator,
+  binkBaseline: Record<string, number>,
+  audioBaseline: Record<string, number>,
+  audioBufferBaseline: Set<number>,
+): Promise<Record<string, unknown>> {
+  const maxDurationMs = Math.min(
+    600_000,
+    Math.max(30_000, Number(process.env.RA2_BROWSER_CAMPAIGN_TIMELINE_MAX_MS ?? 180_000)),
+  );
+  if (EVIDENCE_DIR) mkdirSync(EVIDENCE_DIR, { recursive: true });
+  const startedAtMs = Date.now();
+  const timeline: CampaignTimelineRow[] = [];
+  const performanceReports: Array<Record<string, unknown>> = [];
+  let stopSampling = false;
+  let sampleError: string | null = null;
+  let firstOpen: CampaignTimelineRow | null = null;
+  let firstClose: CampaignTimelineRow | null = null;
+  let safeBoundary: CampaignTimelineRow | null = null;
+  let quietSince: number | null = null;
+  let lastMediaActivityMs = 0;
+  let lastBinkSignature = JSON.stringify(binkBaseline);
+  let previousPlayCount = audioBaseline['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
+  let openScreenshotCaptured = false;
+  let closeScreenshotCaptured = false;
+
+  const sampler = (async () => {
+    while (!stopSampling) {
+      try {
+        const captured = await readCampaignTimelineRow(page);
+        const hostElapsedMs = Date.now() - startedAtMs;
+        const playCount = captured.directSoundCalls['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
+        const row: CampaignTimelineRow = {
+          ...captured,
+          hostElapsedMs,
+          directSoundPlayDelta: playCount - (audioBaseline['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0),
+        };
+        timeline.push(row);
+
+        const binkOpen = row.binkCalls['BINKW32.DLL!_BinkOpen@8'] ?? 0;
+        const binkClose = row.binkCalls['BINKW32.DLL!_BinkClose@4'] ?? 0;
+        const binkSignature = JSON.stringify(row.binkCalls);
+        if (binkSignature !== lastBinkSignature) {
+          lastMediaActivityMs = hostElapsedMs;
+          lastBinkSignature = binkSignature;
+        }
+        if (playCount !== previousPlayCount) {
+          lastMediaActivityMs = hostElapsedMs;
+          previousPlayCount = playCount;
+        }
+        if (!firstOpen && binkOpen > (binkBaseline['BINKW32.DLL!_BinkOpen@8'] ?? 0)) {
+          firstOpen = row;
+          if (EVIDENCE_DIR) {
+            await canvas.screenshot({ path: join(EVIDENCE_DIR, `${GAME_ID}-field-transmission-open.png`) });
+            openScreenshotCaptured = true;
+          }
+        }
+        if (firstOpen && !firstClose && binkClose > (binkBaseline['BINKW32.DLL!_BinkClose@4'] ?? 0)) {
+          firstClose = row;
+          if (EVIDENCE_DIR) {
+            await canvas.screenshot({ path: join(EVIDENCE_DIR, `${GAME_ID}-field-transmission-close.png`) });
+            closeScreenshotCaptured = true;
+          }
+        }
+
+        const activeNewOneShotBuffers = (row.audio?.buffers ?? []).filter(
+          (buffer) => !audioBufferBaseline.has(buffer.id) && buffer.playing && !buffer.loop,
+        );
+        if (firstClose && activeNewOneShotBuffers.length === 0 && hostElapsedMs - lastMediaActivityMs >= 3_000) {
+          quietSince ??= hostElapsedMs;
+          if (hostElapsedMs - quietSince >= 3_000 && (row.canvasFrame ?? 0) > 0) {
+            safeBoundary = row;
+            if (EVIDENCE_DIR) {
+              await canvas.screenshot({ path: join(EVIDENCE_DIR, `${GAME_ID}-field-transmission-restored.png`) });
+            }
+          }
+        } else {
+          quietSince = null;
+        }
+      } catch (error) {
+        sampleError = error instanceof Error ? error.message : String(error);
+        break;
+      }
+      await page.waitForTimeout(250);
+    }
+  })();
+
+  let playable: Record<string, unknown> | null = null;
+  try {
+    const signal = await waitForPlayableBattle(page, canvas, 70_000);
+    playable = { ...signal, reachedAtElapsedMs: Date.now() - startedAtMs };
+    while (Date.now() - startedAtMs < maxDurationMs && !safeBoundary) {
+      const remainingMs = maxDurationMs - (Date.now() - startedAtMs);
+      if (remainingMs <= 0) break;
+      await beginNativePerformanceCapture(page);
+      const captureStartedAt = Date.now();
+      while (Date.now() - captureStartedAt < Math.min(20_500, remainingMs) && !safeBoundary) {
+        await page.waitForTimeout(250);
+      }
+      performanceReports.push(await finishNativePerformanceCapture(page));
+    }
+  } finally {
+    stopSampling = true;
+    await sampler;
+  }
+
+  if (sampleError) throw new Error(`Campaign timeline sampling failed: ${sampleError}`);
+  const nativeObservations = performanceReports.flatMap((report) => {
+    const reportSamples = Array.isArray(report.samples) ? report.samples : [];
+    const reportStartedAt = typeof report.startedAt === 'string' ? Date.parse(report.startedAt) : Number.NaN;
+    return reportSamples.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const sample = entry as { elapsedMs?: unknown; vm?: { game?: unknown } };
+      if (!sample.vm?.game || typeof sample.elapsedMs !== 'number') return [];
+      return [
+        {
+          wallTime: Number.isFinite(reportStartedAt)
+            ? new Date(reportStartedAt + sample.elapsedMs).toISOString()
+            : null,
+          elapsedMs: sample.elapsedMs,
+          game: sample.vm.game,
+        },
+      ];
+    });
+  });
+  // These values are assigned by the sampler closure above; TypeScript cannot follow those asynchronous writes.
+  const firstOpenRow = firstOpen as CampaignTimelineRow | null;
+  const firstCloseRow = firstClose as CampaignTimelineRow | null;
+  const safeBoundaryRow = safeBoundary as CampaignTimelineRow | null;
+  const summary = {
+    schemaVersion: 1,
+    startedAt: new Date(startedAtMs).toISOString(),
+    durationMs: Date.now() - startedAtMs,
+    playable,
+    binkBaseline,
+    audioBaseline,
+    audioBufferBaseline: [...audioBufferBaseline],
+    firstOpen: firstOpenRow,
+    firstClose: firstCloseRow,
+    safeBoundary: safeBoundaryRow,
+    directSoundAtOpen: firstOpenRow?.directSoundCalls ?? null,
+    directSoundAtClose: firstCloseRow?.directSoundCalls ?? null,
+    nativeObservations,
+    nativeReports: performanceReports,
+    finalRow: timeline.at(-1) ?? null,
+    screenshotFiles: EVIDENCE_DIR
+      ? [
+          ...(openScreenshotCaptured ? [`${GAME_ID}-field-transmission-open.png`] : []),
+          ...(closeScreenshotCaptured ? [`${GAME_ID}-field-transmission-close.png`] : []),
+          ...(safeBoundaryRow ? [`${GAME_ID}-field-transmission-restored.png`] : []),
+        ]
+      : [],
+    timeline,
+  };
+  if (EVIDENCE_DIR) {
+    writeFileSync(join(EVIDENCE_DIR, `${GAME_ID}-campaign-timeline.json`), JSON.stringify(summary, null, 2));
+  }
+  return summary;
 }
 
 async function probeMainMenu(
@@ -914,8 +1174,11 @@ async function runShortLifecycleMatrix(page: Page, canvas: Locator): Promise<voi
   console.log(`🔬 lifecycle post-resume health: ${JSON.stringify(probe)}`);
 }
 
-assert(existsSync(join(GAME_ROOT, 'ra2', EXECUTABLE)), `RA2_GAME_ROOT 缺少 ra2/${EXECUTABLE}`);
-assert(existsSync(join(GAME_ROOT, 'ra2', 'BINKW32.DLL')), 'RA2_GAME_ROOT 缺少 ra2/BINKW32.DLL');
+if (!OWNER_SOURCE_MODE) {
+  assert(existsSync(join(GAME_ROOT, 'ra2', EXECUTABLE)), `RA2_GAME_ROOT 缺少 ra2/${EXECUTABLE}`);
+  assert(existsSync(join(GAME_ROOT, 'ra2', 'BINKW32.DLL')), 'RA2_GAME_ROOT 缺少 ra2/BINKW32.DLL');
+}
+if (OWNER_SOURCE_MODE) assert.equal(GAME_ID, 'ra2', 'EA 1.08 local owner-source route is scoped to original RA2.');
 if (IOS_HOST_MODE) assert.equal(GAME_ID, 'ra2', 'iOS private owner mode only supports RA2');
 
 const server = await ensureServer();
@@ -930,7 +1193,7 @@ try {
   const context = await browser.newContext({
     locale: 'zh-CN',
     viewport: { width: 1440, height: 1000 },
-    ignoreHTTPSErrors: true,
+    ignoreHTTPSErrors: !OWNER_SOURCE_MODE,
   });
   await context.addInitScript('globalThis.__name ??= (fn) => fn;');
   await context.addInitScript(
@@ -1103,8 +1366,16 @@ try {
   }
   const page = await context.newPage();
   const pageErrors: string[] = [];
+  const pageConsoleErrors: string[] = [];
+  const ownerRouteResponses: Array<{ path: string; status: number }> = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') pageConsoleErrors.push(message.text().slice(0, 240));
+  });
   page.on('response', (response) => {
     const url = new URL(response.url());
+    if (url.pathname.startsWith('/__ra2-ea108-owner/')) {
+      ownerRouteResponses.push({ path: url.pathname, status: response.status() });
+    }
     if (url.pathname.toLowerCase().startsWith('/game/ra2/')) {
       GAME_ASSET_RESPONSES.push({ path: url.pathname, status: response.status() });
     }
@@ -1121,7 +1392,9 @@ try {
     console.error(`❌ ${GAME_LABEL} pageerror：${detail}`);
   });
   page.on('crash', () => console.error(`❌ ${GAME_LABEL} Chromium renderer crashed`));
-  await page.goto(`${ORIGIN}/?debug=1`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${ORIGIN}/?debug=1${OWNER_SOURCE_MODE ? '&ea108-local-owner=1' : ''}`, {
+    waitUntil: 'domcontentloaded',
+  });
   const canvas = page.locator('#screen');
   if (TAP_TO_START) {
     const tapToStart = page.locator('#ios-tap-to-start');
@@ -1137,7 +1410,7 @@ try {
       throw new Error(`Tap to Start did not complete: ${detail ?? '(no gate error detail)'}`, { cause: error });
     });
   }
-  if (!IOS_HOST_MODE) {
+  if (!IOS_HOST_MODE && !OWNER_SOURCE_MODE) {
     // Local resources now require explicit selection; a fresh browser context has no IndexedDB import cache.
     await page.getByRole('button', { name: '开发测试', exact: true }).click();
     await chooseLocalGameIfPrompted(page, canvas, GAME_ID === 'ra2' ? 0 : 1).catch(async (error: unknown) => {
@@ -1160,20 +1433,83 @@ try {
   }
 
   const problem = page.locator('h3').filter({ hasText: /运行错误|接口待实现/ });
-  await expectShellPage(page, 'mainmenu', 60_000).catch(async (error: unknown) => {
-    const status = await page
-      .locator('#screen')
-      .getAttribute('data-vm-phase')
-      .catch(() => null);
-    const problemText = await problem
-      .first()
-      .textContent()
-      .catch(() => null);
-    throw new Error(
-      `Main menu did not open: phase=${status} problem=${problemText} pageErrors=${pageErrors.length} assetFailures=${GAME_ASSET_FAILURES.length}`,
-      { cause: error },
-    );
-  });
+  let startupEscapeDispatched = false;
+  const startupMonitor = setInterval(() => {
+    void (async () => {
+      const startupCanvas = page.locator('#screen');
+      const [shell, frame, vmStatus, movieStateText, fps] = await Promise.all([
+        startupCanvas.getAttribute('data-shell-page').catch(() => null),
+        startupCanvas.getAttribute('data-vm-frame').catch(() => null),
+        startupCanvas.getAttribute('data-vm-status').catch(() => null),
+        startupCanvas.getAttribute('data-movie-playback-state').catch(() => null),
+        page
+          .locator('#vm-fps')
+          .textContent()
+          .catch(() => null),
+      ]);
+      let movieState: { nativeBinkActive?: boolean; skippableBriefingActive?: boolean } = {};
+      try {
+        movieState = JSON.parse(movieStateText ?? '{}') as typeof movieState;
+      } catch {
+        movieState = {};
+      }
+      if (!startupEscapeDispatched && movieState.nativeBinkActive && !movieState.skippableBriefingActive) {
+        startupEscapeDispatched = true;
+        const box = await startupCanvas.boundingBox();
+        if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        await page.keyboard.press('Escape').catch(() => undefined);
+        console.log(
+          `🔬 Native screen click and Escape sent during the non-campaign EA 1.08 startup movie; ` +
+            `campaign briefing remains untouched.`,
+        );
+      }
+      console.log(
+        `⏳ owner-source startup: shell=${shell ?? '-'} frame=${frame ?? '-'} status=${vmStatus ?? '-'} ` +
+          `movie=${movieStateText ?? '-'} assetResponses=${GAME_ASSET_RESPONSES.length} ` +
+          `latest=${JSON.stringify(GAME_ASSET_RESPONSES.slice(-4))} fps=${fps ?? '-'}`,
+      );
+    })();
+  }, 15_000);
+  await expectShellPage(
+    page,
+    'mainmenu',
+    Number(process.env.RA2_BROWSER_MAIN_MENU_TIMEOUT_MS ?? (OWNER_SOURCE_MODE ? 360_000 : 60_000)),
+  )
+    .catch(async (error: unknown) => {
+      const status = await page
+        .locator('#screen')
+        .getAttribute('data-vm-phase')
+        .catch(() => null);
+      const problemText = await problem
+        .first()
+        .textContent()
+        .catch(() => null);
+      const bodyText = await page
+        .locator('body')
+        .innerText()
+        .then((text) => text.slice(0, 1_200))
+        .catch(() => '(body text unavailable)');
+      let startupScreenshot: string | null = null;
+      if (EVIDENCE_DIR) {
+        mkdirSync(EVIDENCE_DIR, { recursive: true });
+        const screenshotPath = join(EVIDENCE_DIR, 'startup-stalled-canvas.png');
+        try {
+          await page.locator('#screen').screenshot({ path: screenshotPath });
+          startupScreenshot = screenshotPath;
+        } catch {
+          startupScreenshot = null;
+        }
+      }
+      throw new Error(
+        `Main menu did not open: phase=${status} problem=${problemText} pageErrors=${pageErrors.length} ` +
+          `assetFailures=${GAME_ASSET_FAILURES.length} title=${await page.title()} url=${new URL(page.url()).pathname} ` +
+          `assetResponses=${JSON.stringify(GAME_ASSET_RESPONSES.slice(-16))} ` +
+          `ownerRoute=${JSON.stringify(ownerRouteResponses)} consoleErrors=${JSON.stringify(pageConsoleErrors)} ` +
+          `screenshot=${startupScreenshot ?? 'unavailable'} body=${JSON.stringify(bodyText)}`,
+        { cause: error },
+      );
+    })
+    .finally(() => clearInterval(startupMonitor));
   if (TAP_TO_START) {
     const startup = await page.evaluate(() => {
       const rows =
@@ -1220,95 +1556,97 @@ try {
   }
   await waitForQuietFileReads(page, canvas);
   await waitForBinkOpen(page, 0, '首次主菜单');
-  assert.equal(
-    await page.locator('#vm-resolution').inputValue(),
-    EXPECTED_SELECTOR_RESOLUTION,
-    `${GAME_LABEL} 网页分辨率选择没有匹配启动前的保存设置`,
-  );
-  assert.equal(await page.getByText('客体状态', { exact: true }).count(), 0, '仍渲染无用的客体状态区块');
-  await probeHostUi(page);
-  const mainMenuProbe = await probeMainMenu(page, canvas);
-  const presentationProbe = await page.evaluate(() => {
-    const element = document.querySelector<HTMLCanvasElement>('#screen');
-    if (!element) return null;
-    const rect = element.getBoundingClientRect();
-    const gl = element.getContext('webgl2');
-    return {
-      guestResolution: element.dataset.vmResolution ?? null,
-      effectiveIniResolution: element.dataset.vmIniResolution ?? null,
-      renderer: element.dataset.vmRenderer ?? null,
-      cssWidth: rect.width,
-      cssHeight: rect.height,
-      backingWidth: element.width,
-      backingHeight: element.height,
-      devicePixelRatio: window.devicePixelRatio,
-      preserveDrawingBuffer: gl?.getContextAttributes()?.preserveDrawingBuffer ?? null,
-      webglContextLost: gl?.isContextLost() ?? null,
-      centerFramebufferRgba: (() => {
-        if (!gl) return null;
-        gl.finish();
-        const pixel = new Uint8Array(4);
-        gl.readPixels(
-          Math.floor(element.width / 2),
-          Math.floor(element.height / 2),
-          1,
-          1,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
-          pixel,
-        );
-        return [...pixel];
-      })(),
-    };
-  });
-  assert.equal(
-    presentationProbe?.guestResolution,
-    EXPECTED_INITIAL_RESOLUTION,
-    `${GAME_LABEL} effective guest resolution differs from the requested A/B value: ${JSON.stringify(presentationProbe)}`,
-  );
-  if (EXPECT_EFFECTIVE_INI_DIAGNOSTIC && INITIAL_RESOLUTION === 'none' && EXPECTED_INITIAL_RESOLUTION === '800x600') {
+  if (!CAMPAIGN_TIMELINE_ONLY) {
     assert.equal(
-      presentationProbe?.effectiveIniResolution,
-      EXPECTED_INITIAL_RESOLUTION,
-      `${GAME_LABEL} effective RA2.INI did not reach the safe 800x600 fallback: ${JSON.stringify(presentationProbe)}`,
+      await page.locator('#vm-resolution').inputValue(),
+      EXPECTED_SELECTOR_RESOLUTION,
+      `${GAME_LABEL} 网页分辨率选择没有匹配启动前的保存设置`,
     );
-  }
-  console.log(`🔬 Guest/display A/B: ${JSON.stringify(presentationProbe)}`);
-  assert(
-    mainMenuProbe.uniqueFrames >= 5,
-    `主菜单视频未连续播放：${MENU_FRAME_SAMPLES} 次采样只有 ${mainMenuProbe.uniqueFrames} 张不同画面，` +
-      `VM帧=${mainMenuProbe.emittedFrames}，Bink=${await canvas.getAttribute('data-vm-bink-calls')}`,
-  );
-  assert(mainMenuProbe.emittedFrames >= 20, `主菜单实际输出帧过低：采样窗口只有 ${mainMenuProbe.emittedFrames} 帧`);
-  if (mainMenuProbe.displayedFps > 0) {
-    assert(mainMenuProbe.displayedFps >= 20, `主菜单显示帧率过低：${mainMenuProbe.displayedFps.toFixed(1)} fps`);
-  }
-  assert(
-    mainMenuProbe.maxBatchCalls < 4_000,
-    `Worker 调用批次过载：${mainMenuProbe.maxBatchCalls} calls/500ms，热点=${JSON.stringify(mainMenuProbe.maxBatchHot)}`,
-  );
-  assert(
-    mainMenuProbe.maxReadFileCalls <= 100,
-    `文件读取快速路径失效：ReadFile ${mainMenuProbe.maxReadFileCalls} calls/500ms`,
-  );
-  console.log(
-    `🔬 主菜单视频：变化帧=${mainMenuProbe.uniqueFrames}/${MENU_FRAME_SAMPLES}，显示=${mainMenuProbe.displayedFps.toFixed(1)}fps，` +
-      `VM帧=${mainMenuProbe.emittedFrames}，最大调用批次=${mainMenuProbe.maxBatchCalls}/500ms，` +
-      `ReadFile=${mainMenuProbe.maxReadFileCalls}/500ms`,
-  );
-  if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') await captureGuestFrame(page, 'main-menu.png');
-  if (LIFECYCLE_ONLY) {
-    await runShortLifecycleMatrix(page, canvas);
-    console.log('Short lifecycle A/B matrix completed without a page reload.');
-    await browser.close();
-    server?.kill('SIGTERM');
-    process.exit(0);
-  }
-  if (PRESENTATION_ONLY) {
-    console.log(`Presentation-only A/B complete; frameSample=${await canvas.getAttribute('data-vm-frame-sample')}`);
-    await browser.close();
-    server?.kill('SIGTERM');
-    process.exit(0);
+    assert.equal(await page.getByText('客体状态', { exact: true }).count(), 0, '仍渲染无用的客体状态区块');
+    await probeHostUi(page);
+    const mainMenuProbe = await probeMainMenu(page, canvas);
+    const presentationProbe = await page.evaluate(() => {
+      const element = document.querySelector<HTMLCanvasElement>('#screen');
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      const gl = element.getContext('webgl2');
+      return {
+        guestResolution: element.dataset.vmResolution ?? null,
+        effectiveIniResolution: element.dataset.vmIniResolution ?? null,
+        renderer: element.dataset.vmRenderer ?? null,
+        cssWidth: rect.width,
+        cssHeight: rect.height,
+        backingWidth: element.width,
+        backingHeight: element.height,
+        devicePixelRatio: window.devicePixelRatio,
+        preserveDrawingBuffer: gl?.getContextAttributes()?.preserveDrawingBuffer ?? null,
+        webglContextLost: gl?.isContextLost() ?? null,
+        centerFramebufferRgba: (() => {
+          if (!gl) return null;
+          gl.finish();
+          const pixel = new Uint8Array(4);
+          gl.readPixels(
+            Math.floor(element.width / 2),
+            Math.floor(element.height / 2),
+            1,
+            1,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            pixel,
+          );
+          return [...pixel];
+        })(),
+      };
+    });
+    assert.equal(
+      presentationProbe?.guestResolution,
+      EXPECTED_INITIAL_RESOLUTION,
+      `${GAME_LABEL} effective guest resolution differs from the requested A/B value: ${JSON.stringify(presentationProbe)}`,
+    );
+    if (EXPECT_EFFECTIVE_INI_DIAGNOSTIC && INITIAL_RESOLUTION === 'none' && EXPECTED_INITIAL_RESOLUTION === '800x600') {
+      assert.equal(
+        presentationProbe?.effectiveIniResolution,
+        EXPECTED_INITIAL_RESOLUTION,
+        `${GAME_LABEL} effective RA2.INI did not reach the safe 800x600 fallback: ${JSON.stringify(presentationProbe)}`,
+      );
+    }
+    console.log(`🔬 Guest/display A/B: ${JSON.stringify(presentationProbe)}`);
+    assert(
+      mainMenuProbe.uniqueFrames >= 5,
+      `主菜单视频未连续播放：${MENU_FRAME_SAMPLES} 次采样只有 ${mainMenuProbe.uniqueFrames} 张不同画面，` +
+        `VM帧=${mainMenuProbe.emittedFrames}，Bink=${await canvas.getAttribute('data-vm-bink-calls')}`,
+    );
+    assert(mainMenuProbe.emittedFrames >= 20, `主菜单实际输出帧过低：采样窗口只有 ${mainMenuProbe.emittedFrames} 帧`);
+    if (mainMenuProbe.displayedFps > 0) {
+      assert(mainMenuProbe.displayedFps >= 20, `主菜单显示帧率过低：${mainMenuProbe.displayedFps.toFixed(1)} fps`);
+    }
+    assert(
+      mainMenuProbe.maxBatchCalls < 4_000,
+      `Worker 调用批次过载：${mainMenuProbe.maxBatchCalls} calls/500ms，热点=${JSON.stringify(mainMenuProbe.maxBatchHot)}`,
+    );
+    assert(
+      mainMenuProbe.maxReadFileCalls <= 100,
+      `文件读取快速路径失效：ReadFile ${mainMenuProbe.maxReadFileCalls} calls/500ms`,
+    );
+    console.log(
+      `🔬 主菜单视频：变化帧=${mainMenuProbe.uniqueFrames}/${MENU_FRAME_SAMPLES}，显示=${mainMenuProbe.displayedFps.toFixed(1)}fps，` +
+        `VM帧=${mainMenuProbe.emittedFrames}，最大调用批次=${mainMenuProbe.maxBatchCalls}/500ms，` +
+        `ReadFile=${mainMenuProbe.maxReadFileCalls}/500ms`,
+    );
+    if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') await captureGuestFrame(page, 'main-menu.png');
+    if (LIFECYCLE_ONLY) {
+      await runShortLifecycleMatrix(page, canvas);
+      console.log('Short lifecycle A/B matrix completed without a page reload.');
+      await browser.close();
+      server?.kill('SIGTERM');
+      process.exit(0);
+    }
+    if (PRESENTATION_ONLY) {
+      console.log(`Presentation-only A/B complete; frameSample=${await canvas.getAttribute('data-vm-frame-sample')}`);
+      await browser.close();
+      server?.kill('SIGTERM');
+      process.exit(0);
+    }
   }
   assert.equal(await problem.count(), 0, '主菜单出现运行错误');
   await page.waitForTimeout(750);
@@ -1374,11 +1712,50 @@ try {
   await page.waitForTimeout(1_000);
   if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') await captureGuestFrame(page, 'campaign-selection.png');
   if (CAMPAIGN_SELECTION_ONLY) {
+    let briefingBinkBaseline: Record<string, number> | null = null;
+    let briefingAudioBaseline: Record<string, number> | null = null;
     if (CAMPAIGN_CHOICE === 'allied' || CAMPAIGN_CHOICE === 'soviet') {
       const [x, y] = CAMPAIGN_CHOICE === 'allied' ? [310, 90] : [315, 375];
       const [width, height] = ((await canvas.getAttribute('data-vm-resolution')) ?? '800x600').split('x').map(Number);
-      await clickGuest(page, canvas, Math.round((x * width!) / 800), Math.round((y * height!) / 600));
-      await page.waitForTimeout(Number(process.env.RA2_BROWSER_CAMPAIGN_ENTRY_WAIT_MS ?? 2_000));
+      if (CAMPAIGN_TIMELINE_ONLY) {
+        assert.equal(CAMPAIGN_CHOICE, 'allied', 'Campaign transmission evidence is scoped to the Allied campaign.');
+        briefingBinkBaseline = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
+        briefingAudioBaseline = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
+        await probeCampaignHover(page, canvas, campaignHoverPlayBefore);
+      }
+      if (CAMPAIGN_TIMELINE_ONLY) {
+        // A single native click can miss the original faction hotspot when the campaign shell
+        // has not finished presenting. Retry the same real mouse action around that hotspot,
+        // waiting for the game to destroy its menu before each subsequent click.
+        const alliedOffsets = [
+          [0, 0],
+          [-20, 0],
+          [20, 0],
+          [0, -10],
+          [0, 10],
+        ] as const;
+        for (const [offsetX, offsetY] of alliedOffsets) {
+          if (!(await canvas.getAttribute('data-shell-page'))) break;
+          const [targetX, targetY] = campaignMenuGuestPoint(x + offsetX, y + offsetY, width!, height!);
+          await clickGuest(page, canvas, targetX, targetY);
+          try {
+            await page.waitForFunction(
+              () =>
+                !document.querySelector<HTMLCanvasElement>('#screen')?.dataset.shellPage ||
+                document.querySelector<HTMLCanvasElement>('#screen')?.dataset.moviePlayback === 'skippable-briefing',
+              undefined,
+              { timeout: 4_000 },
+            );
+            break;
+          } catch {
+            // Continue with the next small offset only after the native menu remained open.
+          }
+        }
+      } else {
+        const [targetX, targetY] = campaignMenuGuestPoint(x, y, width!, height!);
+        await clickGuest(page, canvas, targetX, targetY);
+        await page.waitForTimeout(Number(process.env.RA2_BROWSER_CAMPAIGN_ENTRY_WAIT_MS ?? 2_000));
+      }
       if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') {
         await captureGuestFrame(page, `${CAMPAIGN_CHOICE}-entry.png`);
       }
@@ -1386,8 +1763,72 @@ try {
         `Campaign ${CAMPAIGN_CHOICE} entry probe; shell=${await canvas.getAttribute('data-shell-page')}; ` +
           `movie=${await canvas.getAttribute('data-movie-playback-state')}; ` +
           `battlefield=${await canvas.getAttribute('data-vm-battlefield')}; frame=${await canvas.getAttribute('data-vm-frame')}; ` +
-          `status=${await canvas.getAttribute('data-vm-status')}; bink=${await canvas.getAttribute('data-vm-bink-calls')}`,
+          `status=${await canvas.getAttribute('data-vm-status')}; cursor=${await canvas.getAttribute('data-vm-cursor')}; ` +
+          `campaignHover=${await canvas.getAttribute('data-vm-campaign-hover-dispatches')}; ` +
+          `workerMouse=${await canvas.getAttribute('data-vm-worker-mouse')}; bink=${await canvas.getAttribute('data-vm-bink-calls')}`,
       );
+      if (CAMPAIGN_TIMELINE_ONLY) {
+        try {
+          await page.waitForFunction(
+            () => document.querySelector<HTMLCanvasElement>('#screen')?.dataset.moviePlayback === 'skippable-briefing',
+            undefined,
+            { timeout: Number(process.env.RA2_BROWSER_CAMPAIGN_BRIEFING_TIMEOUT_MS ?? 120_000) },
+          );
+        } catch (error) {
+          if (process.env.RA2_BROWSER_CAPTURE_GUEST_FRAMES === '1') {
+            await captureGuestFrame(page, 'allied-transition-timeout.png');
+          }
+          throw new Error(
+            `Allied campaign transition produced no skippable briefing: shell=${await canvas.getAttribute('data-shell-page')}; ` +
+              `movie=${await canvas.getAttribute('data-movie-playback-state')}; battlefield=${await canvas.getAttribute('data-vm-battlefield')}; ` +
+              `frame=${await canvas.getAttribute('data-vm-frame')}; status=${await canvas.getAttribute('data-vm-status')}; ` +
+              `cursor=${await canvas.getAttribute('data-vm-cursor')}; hover=${await canvas.getAttribute('data-vm-campaign-hover-dispatches')}; ` +
+              `workerMouse=${await canvas.getAttribute('data-vm-worker-mouse')}; bink=${await canvas.getAttribute('data-vm-bink-calls')}; ` +
+              `audio=${await canvas.getAttribute('data-vm-audio-calls')}`,
+            { cause: error },
+          );
+        }
+        await probeCampaignVideo(
+          page,
+          canvas,
+          briefingBinkBaseline?.['BINKW32.DLL!_BinkOpen@8'] ?? 0,
+          briefingBinkBaseline?.['BINKW32.DLL!_BinkClose@4'] ?? 0,
+          briefingAudioBaseline ?? {},
+          briefingBinkBaseline ?? {},
+          true,
+        );
+        const briefingBinkAfter = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
+        const briefingAudioAfter = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
+        const battlefieldBinkBaseline = callsOf(await canvas.getAttribute('data-vm-bink-calls'));
+        const battlefieldAudioBaseline = callsOf(await canvas.getAttribute('data-vm-audio-calls'));
+        const battlefieldAudioState = await readAudioProgress(page);
+        const baselineBuffers = new Set((battlefieldAudioState?.buffers ?? []).map((buffer) => buffer.id));
+        const timeline = await collectCampaignTimeline(
+          page,
+          canvas,
+          battlefieldBinkBaseline,
+          battlefieldAudioBaseline,
+          baselineBuffers,
+        );
+        const firstOpen = timeline.firstOpen as CampaignTimelineRow | null;
+        const firstClose = timeline.firstClose as CampaignTimelineRow | null;
+        const safeBoundary = timeline.safeBoundary as CampaignTimelineRow | null;
+        console.log(
+          `Campaign evidence timeline: briefing BinkOpen=${(briefingBinkAfter['BINKW32.DLL!_BinkOpen@8'] ?? 0) - (briefingBinkBaseline?.['BINKW32.DLL!_BinkOpen@8'] ?? 0)} ` +
+            `BinkClose=${(briefingBinkAfter['BINKW32.DLL!_BinkClose@4'] ?? 0) - (briefingBinkBaseline?.['BINKW32.DLL!_BinkClose@4'] ?? 0)} ` +
+            `DirectSoundPlayΔ=${(briefingAudioAfter['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0) - (briefingAudioBaseline?.['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0)}; ` +
+            `field open=${firstOpen?.capturedAt ?? 'not observed'} close=${firstClose?.capturedAt ?? 'not observed'} ` +
+            `safe boundary=${safeBoundary?.capturedAt ?? 'not observed'} native samples=${Array.isArray(timeline.nativeObservations) ? timeline.nativeObservations.length : 0}`,
+        );
+        if (Array.isArray(timeline.nativeObservations)) {
+          console.log(`Campaign native observations: ${JSON.stringify(timeline.nativeObservations)}`);
+        }
+        assert.equal(await problem.count(), 0, 'Allied campaign entry produced a runtime failure');
+        assert.deepEqual(pageErrors, [], `Allied campaign entry browser errors: ${pageErrors.join('\n')}`);
+        await browser.close();
+        server?.kill('SIGTERM');
+        process.exit(0);
+      }
     }
     if (CAMPAIGN_ENTRY_PROOF_ONLY) {
       assert.equal(CAMPAIGN_CHOICE, 'allied', 'private entry proof is scoped to the Allied campaign');
@@ -1451,12 +1892,13 @@ try {
     .map(Number);
   for (const [offsetX, offsetY] of alliedOffsets) {
     if (!(await canvas.getAttribute('data-shell-page'))) break;
-    await clickGuest(
-      page,
-      canvas,
-      Math.round(((factionX + offsetX) * guestWidth!) / 800),
-      Math.round(((factionY + offsetY) * guestHeight!) / 600),
+    const [targetX, targetY] = campaignMenuGuestPoint(
+      factionX + offsetX,
+      factionY + offsetY,
+      guestWidth!,
+      guestHeight!,
     );
+    await clickGuest(page, canvas, targetX, targetY);
     try {
       await page.waitForFunction(
         () => !document.querySelector<HTMLCanvasElement>('#screen')?.dataset.shellPage,

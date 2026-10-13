@@ -21,6 +21,9 @@ type ViteHttpServer = NonNullable<ViteDevServer['httpServer']> | NonNullable<Pre
  */
 const GAME_DIR = resolve(process.env.RA2_GAME_ROOT || fileURLToPath(new URL('./game', import.meta.url)));
 const EA108_DEV_OWNER_SOURCE_ENABLED = isEa108DevOwnerSourceEnabled(process.env);
+// Loopback is a secure browser context. This explicit opt-in keeps the private owner-data run on HTTP without
+// teaching the browser test to suppress a certificate warning; the default development server remains HTTPS.
+const EA108_DEV_LOCAL_HTTP = EA108_DEV_OWNER_SOURCE_ENABLED && process.env.RA2_EA108_DEV_LOCAL_HTTP === '1';
 
 function ea108DevOwnerSourcePlugin(): Plugin {
   return {
@@ -214,7 +217,12 @@ function isWithinGameDirectory(candidate: string): boolean {
 }
 
 export default defineConfig({
-  plugins: [basicSsl(), ea108DevOwnerSourcePlugin(), gameAssetsPlugin(), ra2NetworkRelayPlugin()],
+  plugins: [
+    ...(EA108_DEV_LOCAL_HTTP ? [] : [basicSsl()]),
+    ea108DevOwnerSourcePlugin(),
+    gameAssetsPlugin(),
+    ra2NetworkRelayPlugin(),
+  ],
   // VM pages with hmr=false cannot rely on reloads to handle a second prebundle. Register JSX and Worker dynamic dependencies
   // up front to avoid a second React instance in lazy pages. This only builds development caches; browser experiments are not preloaded.
   optimizeDeps: {
