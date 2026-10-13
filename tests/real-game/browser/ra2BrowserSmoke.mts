@@ -6,6 +6,7 @@ import { request as httpsRequest } from 'node:https';
 import { join, resolve } from 'node:path';
 import { chromium, type Locator, type Page } from '@playwright/test';
 import { assessBriefingAudioHealth } from './briefingAudioHealth';
+import { assessCampaignAudioBoundary } from './campaignAudioBoundary';
 
 const ORIGIN = process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174';
 const MENU_FRAME_SAMPLES = 6;
@@ -874,7 +875,7 @@ async function collectCampaignTimeline(
   let firstOpen: CampaignTimelineRow | null = null;
   let firstClose: CampaignTimelineRow | null = null;
   let safeBoundary: CampaignTimelineRow | null = null;
-  let quietSince: number | null = null;
+  let latestBoundaryBlockers: string[] = ['bink-close-not-observed'];
   let lastMediaActivityMs = 0;
   let lastBinkSignature = JSON.stringify(binkBaseline);
   let previousPlayCount = audioBaseline['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
@@ -920,19 +921,26 @@ async function collectCampaignTimeline(
           }
         }
 
-        const activeNewOneShotBuffers = (row.audio?.buffers ?? []).filter(
-          (buffer) => !audioBufferBaseline.has(buffer.id) && buffer.playing && !buffer.loop,
-        );
-        if (firstClose && activeNewOneShotBuffers.length === 0 && hostElapsedMs - lastMediaActivityMs >= 3_000) {
-          quietSince ??= hostElapsedMs;
-          if (hostElapsedMs - quietSince >= 3_000 && (row.canvasFrame ?? 0) > 0) {
-            safeBoundary = row;
-            if (EVIDENCE_DIR) {
-              await canvas.screenshot({ path: join(EVIDENCE_DIR, `${GAME_ID}-field-transmission-restored.png`) });
-            }
+        const assessment = assessCampaignAudioBoundary({
+          binkClosed: firstClose !== null,
+          // The current runtime state reports open/close activity only; it has no EOF-vs-cancel or nested-handle proof.
+          binkCompletion: 'unknown',
+          activeNativeBinkSessions: null,
+          audioBuffers:
+            row.audio?.buffers.map((buffer) => ({
+              playing: buffer.playing,
+              looping: buffer.loop,
+              transmissionOwned: null,
+            })) ?? null,
+          mediaQuietMs: hostElapsedMs - lastMediaActivityMs,
+          canvasFrame: row.canvasFrame,
+        });
+        latestBoundaryBlockers = assessment.blockers;
+        if (assessment.safe) {
+          safeBoundary = row;
+          if (EVIDENCE_DIR) {
+            await canvas.screenshot({ path: join(EVIDENCE_DIR, `${GAME_ID}-field-transmission-restored.png`) });
           }
-        } else {
-          quietSince = null;
         }
       } catch (error) {
         sampleError = error instanceof Error ? error.message : String(error);
@@ -995,6 +1003,7 @@ async function collectCampaignTimeline(
     firstOpen: firstOpenRow,
     firstClose: firstCloseRow,
     safeBoundary: safeBoundaryRow,
+    safeBoundaryAssessment: { safe: safeBoundaryRow !== null, blockers: latestBoundaryBlockers },
     directSoundAtOpen: firstOpenRow?.directSoundCalls ?? null,
     directSoundAtClose: firstCloseRow?.directSoundCalls ?? null,
     nativeObservations,
