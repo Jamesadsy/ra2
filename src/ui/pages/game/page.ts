@@ -81,6 +81,7 @@ let activeSkippableBriefingMovie = false;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
+  delete (window as Window & { __RA2MediaProvenanceProbe?: unknown }).__RA2MediaProvenanceProbe;
   nativeFirstFrameAcknowledged = false;
   presentationMetricsStartedAt = performance.now();
   presentationFramesSinceMetrics = 0;

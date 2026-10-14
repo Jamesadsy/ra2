@@ -11,6 +11,7 @@ import type { Ra2NetworkConfig } from '../games/ra2/networkTransport';
 import type { VmLifecycleAction, VmLifecycleSnapshot } from './vmLifecycle';
 import type { VmMoviePlaybackState } from '../contracts/moviePlayback';
 import type { AudioReader } from './audioReader';
+import type { MediaProvenanceEvent } from '../contracts/mediaProvenance';
 
 /** Main-thread/Worker message protocol. Array fields (PCM/frames/EXE) transfer ownership; a single FIFO channel preserves order. */
 
@@ -55,6 +56,8 @@ export interface VmInitConfig {
   masterVolume: number;
   /** F2/?debug call hotspots; when disabled, the Worker only increments an integer per HC. */
   traceCalls: boolean;
+  /** Explicit loopback-only RA2 native media metadata probe. */
+  mediaProvenance?: boolean;
 }
 
 export type MainToWorkerMessage =
@@ -103,6 +106,7 @@ export type WorkerToMainMessage =
   | { type: 'status'; phase: VmPhase; detail: string }
   | { type: 'shell-page'; title: string }
   | { type: 'movie-state'; state: VmMoviePlaybackState }
+  | { type: 'media-provenance'; event: MediaProvenanceEvent }
   | { type: 'guest-resolution'; resolution: string | null }
   | { type: 'call-batch'; batch: VmCallBatch }
   | { type: 'blocked'; call: Win32Call }

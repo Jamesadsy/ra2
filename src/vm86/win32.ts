@@ -48,6 +48,8 @@ import {
   type VmMoviePlaybackTracker,
 } from '../contracts/moviePlayback';
 import type { GameFileMetadata } from '../contracts/fileMetadata';
+import type { MediaProvenanceEvent } from '../contracts/mediaProvenance';
+import { sanitizeGuestMediaName } from '../contracts/mediaProvenance';
 
 const GUEST_BINK_VIDEO_EXPORTS = new Set([
   '_BinkSetSoundSystem@8',
@@ -172,6 +174,15 @@ export interface VmCallbackState {
 export interface Win32ShimOptions {
   /** First dynamic COM hypercall ID after static PE imports. */
   firstDynamicId?: number;
+  /** Explicit local-only opt-in for bounded, metadata-only media provenance events. */
+  mediaProvenance?: boolean;
+  /** Current VM counters attached to each opt-in media provenance event. */
+  guestLogicFrame?: () => number;
+  guestCallOrdinal?: () => number;
+  /** Main executable range used only to identify read-only guest call-site provenance. */
+  mainModuleBase?: number;
+  mainModuleSize?: number;
+  onMediaProvenance?: (event: MediaProvenanceEvent) => void;
   /** Main-module static IAT; temporarily connect frequent exports directly while native guest DLLs are active, avoiding serial IRQ round trips. */
   staticImports?: readonly PeImport[];
   onFrame?: (frame: VmFrame) => void;
@@ -231,6 +242,13 @@ export interface Win32ShimOptions {
   importArgBytes?: ImportArgBytes;
   /** Import-stub factory for dynamic guest DLLs; use the main PE's fast-path configuration. */
   dynamicImportStub?: ImportStubFactory;
+}
+
+interface BinkLogicalSourceEvidence {
+  logicalMediaName: string | null;
+  logicalMediaId: string | null;
+  sourceOffsetBytes: number | null;
+  sourceKind: 'file-handle' | 'guest-name' | 'unknown';
 }
 
 /** GetDriveTypeA drive type from the Win32 DRIVE_* values used here. */
@@ -525,6 +543,121 @@ export class Win32ShimBase extends CommonWin32Shim {
     lastNonEmptyShellPageTitle: '',
     previousNativeBinkActive: false,
   };
+  private lastMediaProvenanceShellState = '';
+  private nextBinkCallSequence = 0;
+  private nextBinkHandleId = 0;
+  private readonly nativeBinkOpenCandidates: Array<{ openCallId: string; logicalMediaId: string | null }> = [];
+  private nativeBinkOverlapObserved = false;
+  private readonly nativeBinkHandleTokens = new Map<number, string>();
+  private readonly syntheticBinkSessions = new Map<number, string>();
+
+  private binkLogicalSource(nameOrHandle: number, flags: number): BinkLogicalSourceEvidence {
+    try {
+      if ((flags & 0x0080_0000) !== 0) {
+        const file = this.fileHandles.get(nameOrHandle >>> 0);
+        const logicalMediaName = sanitizeGuestMediaName(file?.path ?? '');
+        const sourceOffsetBytes = file?.position ?? null;
+        return {
+          logicalMediaName,
+          logicalMediaId:
+            logicalMediaName === null
+              ? null
+              : `${logicalMediaName.toLowerCase()}${sourceOffsetBytes === null ? '' : `@${sourceOffsetBytes.toString(16)}`}`,
+          sourceOffsetBytes,
+          sourceKind: file ? 'file-handle' : 'unknown',
+        };
+      }
+      const logicalMediaName = sanitizeGuestMediaName(nameOrHandle ? this.readCString(nameOrHandle, 512) : '');
+      return {
+        logicalMediaName,
+        logicalMediaId: logicalMediaName?.toLowerCase() ?? null,
+        sourceOffsetBytes: null,
+        sourceKind: logicalMediaName ? 'guest-name' : 'unknown',
+      };
+    } catch {
+      return { logicalMediaName: null, logicalMediaId: null, sourceOffsetBytes: null, sourceKind: 'unknown' };
+    }
+  }
+
+  private nextBinkCallId(mode: 'native' | 'synthetic'): string {
+    this.nextBinkCallSequence++;
+    return `bink-${mode}-call-${this.nextBinkCallSequence.toString().padStart(4, '0')}`;
+  }
+
+  private nativeBinkHandleToken(handle: number): string {
+    let token = this.nativeBinkHandleTokens.get(handle >>> 0);
+    if (!token) {
+      token = `bink-handle-${(++this.nextBinkHandleId).toString().padStart(4, '0')}`;
+      this.nativeBinkHandleTokens.set(handle >>> 0, token);
+      if (this.nativeBinkHandleTokens.size > 32) {
+        const oldest = this.nativeBinkHandleTokens.keys().next().value;
+        if (oldest !== undefined) this.nativeBinkHandleTokens.delete(oldest);
+      }
+    }
+    return token;
+  }
+
+  private recordNativeBinkOpen(
+    source: BinkLogicalSourceEvidence,
+    openFlags: number,
+    caller: { moduleName: string | null; rva: number | null },
+  ): void {
+    const openCallId = this.nextBinkCallId('native');
+    if (this.nativeBinkOpenCandidates.length > 0) this.nativeBinkOverlapObserved = true;
+    this.nativeBinkOpenCandidates.push({ openCallId, logicalMediaId: source.logicalMediaId });
+    this.recordMediaProvenance('bink', 'open-call', {
+      openCallId,
+      mode: 'native',
+      openFlags,
+      logicalMediaName: source.logicalMediaName,
+      logicalMediaId: source.logicalMediaId,
+      sourceKind: source.sourceKind,
+      sourceOffsetBytes: source.sourceOffsetBytes,
+      callerModule: caller.moduleName,
+      callerRva: caller.rva,
+      nativeOpenCandidateCount: this.nativeBinkOpenCandidates.length,
+      overlapObserved: this.nativeBinkOverlapObserved,
+      actualSessionHandle: null,
+      openResultObserved: false,
+      actualSessionCount: null,
+      naturalEndState: 'unknown',
+      frameNumber: null,
+      totalFrames: null,
+      frameProgressReason: 'native per-frame Bink exports are routed directly to the guest DLL',
+    });
+  }
+
+  private recordNativeBinkClose(handle: number, caller: { moduleName: string | null; rva: number | null }): void {
+    const before = this.nativeBinkOpenCandidates.length;
+    const candidatesBeforeClose = this.nativeBinkOpenCandidates.map((candidate) => candidate.openCallId);
+    const candidate = before === 1 && !this.nativeBinkOverlapObserved ? this.nativeBinkOpenCandidates[0] : null;
+    if (before > 0) this.nativeBinkOpenCandidates.shift();
+    const overlapObserved = this.nativeBinkOverlapObserved;
+    if (this.nativeBinkOpenCandidates.length === 0) this.nativeBinkOverlapObserved = false;
+    this.recordMediaProvenance('bink', 'close-call', {
+      openCallCandidate: candidate?.openCallId ?? null,
+      handleToken: this.nativeBinkHandleToken(handle),
+      handleTokenObservedAt: 'close-call-only; native open return is not observable through this shim path',
+      mode: 'native',
+      correlation: candidate
+        ? 'single-outstanding-open-call-candidate-only'
+        : before > 0
+          ? 'ambiguous-open-candidates'
+          : 'unmatched-close',
+      candidateOpenCallIds: candidatesBeforeClose,
+      nativeOpenCandidateCountBefore: before,
+      nativeOpenCandidateCountAfter: this.nativeBinkOpenCandidates.length,
+      overlapObserved,
+      closeReason: 'unknown',
+      actualSessionCountAfter: null,
+      naturalEndState: 'unknown',
+      callerModule: caller.moduleName,
+      callerRva: caller.rva,
+      frameNumber: null,
+      totalFrames: null,
+      frameProgressReason: 'native per-frame Bink exports are routed directly to the guest DLL',
+    });
+  }
 
   inspectMoviePlaybackState(): VmMoviePlaybackState {
     const update = updateMoviePlaybackState(
@@ -534,6 +667,20 @@ export class Win32ShimBase extends CommonWin32Shim {
       this.inspectShellPageTitle(),
     );
     this.moviePlaybackTracker = update.tracker;
+    if (this.options.mediaProvenance) {
+      const serialized = JSON.stringify(update.state);
+      if (serialized !== this.lastMediaProvenanceShellState) {
+        this.lastMediaProvenanceShellState = serialized;
+        this.recordMediaProvenance('bink', 'shell-state-observation', {
+          shellPageTitle: update.state.shellPageTitle,
+          shimNativeOpenCloseState: update.state.nativeBinkActive,
+          syntheticPlayerPresent: update.state.syntheticBinkActive,
+          skippableBriefingDerivedFromShimState: update.state.skippableBriefingActive,
+          nativeTransmissionCompletionSignal: false,
+          naturalEndState: 'unknown',
+        });
+      }
+    }
     return update.state;
   }
 
@@ -605,14 +752,17 @@ export class Win32ShimBase extends CommonWin32Shim {
           this.routeStaticGuestDllExports('BINKW32.DLL', DIRECT_NATIVE_BINK_EXPORTS, false);
           this.restoreDynamicGuestDllExports('BINKW32.DLL');
         }
+        const binkCaller = this.guestCallerIdentity(call.stack);
         if (this.redirectGuestDllExport(call, 'BINKW32.DLL', exportName, true)) {
           if (exportName === '_BinkSetSoundSystem@8') {
             this.nativeBinkSoundSystemReady = true;
           } else if (exportName === '_BinkOpen@8') {
             this.nativeBinkPlaybackActive = true;
             this.nativeBinkPlaybackOpens++;
+            this.recordNativeBinkOpen(this.binkLogicalSource(a[0] ?? 0, a[1] ?? 0), a[1] ?? 0, binkCaller);
             this.routeStaticGuestDllExports('BINKW32.DLL', DIRECT_NATIVE_BINK_EXPORTS, true);
           } else if (exportName === '_BinkClose@4') {
+            this.recordNativeBinkClose(binkHandle, binkCaller);
             this.nativeBinkPlaybackActive = false;
             // Only the return address has changed so far; guest BinkClose has not run. Keep the outer lock
             // until cleanup enters atomicGuestCall or the next import after full return.
@@ -635,6 +785,8 @@ export class Win32ShimBase extends CommonWin32Shim {
         case 'BINKW32.DLL!_BinkGetError@0':
           return { eax: 0 };
         case 'BINKW32.DLL!_BinkOpen@8': {
+          const openCallId = this.nextBinkCallId('synthetic');
+          const source = this.binkLogicalSource(a[0] ?? 0, a[1] ?? 0);
           const handle = this.alloc(0x100, true);
           if (!handle) return { eax: 0 };
           this.writeU32(handle + 0x00, 640); // Width
@@ -645,7 +797,24 @@ export class Win32ShimBase extends CommonWin32Shim {
           this.writeU32(handle + 0x14, 15); // FrameRate
           this.writeU32(handle + 0x18, 1); // FrameRateDiv must be nonzero to avoid division by zero when computing frame intervals.
           this.binkVideos.add(handle);
+          this.syntheticBinkSessions.set(handle, openCallId);
           this.binkNextFrameAt.set(handle, this.clock.now());
+          this.recordMediaProvenance('bink', 'open-call', {
+            openCallId,
+            mode: 'synthetic',
+            simulated: true,
+            openFlags: a[1] ?? 0,
+            logicalMediaName: source.logicalMediaName,
+            logicalMediaId: source.logicalMediaId,
+            sourceKind: source.sourceKind,
+            sourceOffsetBytes: source.sourceOffsetBytes,
+            openResultObserved: true,
+            frameNumber: 1,
+            totalFrames: 1,
+            syntheticCompletion: 'frame number initialized at total frames',
+            callerModule: this.guestCallerIdentity(call.stack).moduleName,
+            callerRva: this.guestCallerIdentity(call.stack).rva,
+          });
           return { eax: handle };
         }
         // BinkWait paces by frame rate: return 0 when due so the game calls DoFrame/NextFrame,
@@ -670,6 +839,11 @@ export class Win32ShimBase extends CommonWin32Shim {
             const frame = this.readU32(h + 0x0c) + 1;
             this.writeU32(h + 0x0c, frame);
             this.writeU32(h + 0x10, frame - 1);
+            this.recordMediaProvenance('bink', 'synthetic-frame-advance', {
+              openCallId: this.syntheticBinkSessions.get(h) ?? null,
+              frameNumber: frame,
+              totalFrames: this.readU32(h + 0x08),
+            });
           }
           return { eax: 0 };
         }
@@ -688,9 +862,24 @@ export class Win32ShimBase extends CommonWin32Shim {
         }
         case 'BINKW32.DLL!_BinkClose@4': {
           const h = a[0] ?? 0;
+          const syntheticOpenCallId = this.syntheticBinkSessions.get(h);
+          if (this.binkVideos.has(h)) {
+            this.recordMediaProvenance('bink', 'close-call', {
+              openCallId: syntheticOpenCallId ?? null,
+              handleToken: syntheticOpenCallId ? `handle-${syntheticOpenCallId}` : null,
+              mode: 'synthetic',
+              closeReason: 'synthetic-shim-close-observed',
+              frameNumber: this.readU32(h + 0x0c),
+              totalFrames: this.readU32(h + 0x08),
+              naturalEndState:
+                this.readU32(h + 0x0c) >= this.readU32(h + 0x08) ? 'synthetic-complete' : 'synthetic-incomplete',
+              actualSessionCountAfter: this.binkVideos.size - 1,
+            });
+          }
           this.nativeBinkThreadReleasePending = false;
           this.releaseNativeBinkThread();
           this.binkVideos.delete(h);
+          this.syntheticBinkSessions.delete(h);
           this.binkNextFrameAt.delete(h);
           return { eax: 0 };
         }

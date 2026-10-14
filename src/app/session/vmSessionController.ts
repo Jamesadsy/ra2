@@ -116,6 +116,9 @@ export function guardVmCallbacks(callbacks: GameVmCallbacks, isCurrent: () => bo
     onMoviePlaybackState: (state) => {
       if (isCurrent()) callbacks.onMoviePlaybackState?.(state);
     },
+    onMediaProvenance: (event) => {
+      if (isCurrent()) callbacks.onMediaProvenance?.(event);
+    },
     onGuestResolution: (resolution) => {
       if (isCurrent()) callbacks.onGuestResolution?.(resolution);
     },

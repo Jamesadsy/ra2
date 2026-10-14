@@ -12,6 +12,11 @@ import type {
   Win32Result,
   Win32ShimOptions,
 } from '../win32';
+import type {
+  MediaProvenanceDomain,
+  MediaProvenanceEvent,
+  MediaProvenanceValue,
+} from '../../contracts/mediaProvenance';
 import {
   GUEST_CALLBACK_BASE,
   GUEST_CALLBACK_STRIDE,
@@ -155,6 +160,7 @@ export function shimTraceEnabled(name: string): boolean {
  * Base state for the generic Win32 shim: heap/virtual memory, threads, windows, messages, input, memory helpers, and diagnostic snapshots. File, guest-DLL, synchronization, and graphics state live in stateFiles/stateGuestDll/stateSync/stateGraphics mixins, composed in order by win32.ts and Win32 dispatch modules.
  */
 export class ShimState {
+  private mediaProvenanceSequence = 0;
   protected get lastError(): number {
     return this.readU32(HYPERCALL_LAST_ERROR);
   }
@@ -391,6 +397,32 @@ export class ShimState {
     const driveTypes = options.driveTypes ?? { C: DRIVE_FIXED };
     for (const [letter, type] of Object.entries(driveTypes)) {
       if (/^[a-z]$/i.test(letter)) this.driveTypes.set(letter.toUpperCase(), type >>> 0);
+    }
+  }
+
+  /** Emit an opt-in, bounded-payload observation without touching guest state or media contents. */
+  protected recordMediaProvenance(
+    domain: MediaProvenanceDomain,
+    action: string,
+    details: Readonly<Record<string, MediaProvenanceValue>>,
+  ): void {
+    if (!this.options.mediaProvenance || !this.options.onMediaProvenance) return;
+    try {
+      const now = Date.now();
+      const monotonicMs = typeof performance === 'undefined' ? now : performance.now();
+      const event: MediaProvenanceEvent = {
+        sequence: ++this.mediaProvenanceSequence,
+        observedAt: new Date(now).toISOString(),
+        monotonicMs,
+        guestLogicFrame: this.options.guestLogicFrame?.() ?? null,
+        guestCallOrdinal: this.options.guestCallOrdinal?.() ?? null,
+        domain,
+        action,
+        details,
+      };
+      this.options.onMediaProvenance(event);
+    } catch {
+      // Diagnostic failures must never interfere with a guest Win32 call.
     }
   }
 

@@ -25,6 +25,7 @@ import type { GameFileEntry, VmInitConfig } from './vmProtocol';
 import type { VmPointerState, VmShell } from './vmShell';
 import type { VmAudioLifecycleSnapshot, VmLifecycleAction, VmLifecycleReport } from './vmLifecycle';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
+import { isLocalMediaProvenanceOptIn } from '../contracts/mediaProvenance';
 import { reportNativeRuntimeError, reportNativeRuntimePhase } from '../platform/browser/nativeDiagnostics';
 import { withGameResolutionOverride } from '../games/resolution';
 import { randomMultiplayerName, validateMultiplayerName, withMultiplayerNameOverride } from '../games/multiplayerName';
@@ -88,6 +89,7 @@ export async function createVmShell(
   // Carry this explicitly into the Worker; an overlay added only on the page would be lost by the HTTP backend.
   const additionalFiles = source.additionalFiles;
   const mainThreadSource = additionalFiles ? mountCustomMapFiles(source, additionalFiles) : source;
+  const mediaProvenance = typeof window !== 'undefined' && isLocalMediaProvenanceOptIn(source.game.id, window.location);
   const ra2Network = await resolveRa2NetworkConfig(source);
   // Generate the name once at creation and reuse it on Worker-init fallback; future authenticated identities come from options.
   const playerName = validateMultiplayerName(options.playerName ?? randomMultiplayerName());
@@ -110,6 +112,7 @@ export async function createVmShell(
         workerProbeMs: null,
         fallbackReason: null,
       },
+      mediaProvenance,
     );
   }
   const handle = directoryHandleOf(source.files);
@@ -163,6 +166,7 @@ export async function createVmShell(
     clockRate: 1,
     masterVolume: DEFAULT_MASTER_VOLUME,
     traceCalls: typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1',
+    mediaProvenance,
   };
   let closeRelayPort: (() => void) | undefined;
   if (ra2Network) {
@@ -213,6 +217,7 @@ export async function createVmShell(
       ra2Network,
       options.startupPage,
       runtimeInfo,
+      mediaProvenance,
     );
   }
 }
@@ -242,6 +247,7 @@ export class Win32GameVm implements VmShell {
       workerProbeMs: null,
       fallbackReason: null,
     },
+    mediaProvenance = false,
   ) {
     this.fileProvider = source.files;
     const probe = new BrowserEmulatorProbe();
@@ -255,6 +261,7 @@ export class Win32GameVm implements VmShell {
         window.requestAnimationFrame(emit);
       },
       packedRgb565Frames: true,
+      mediaProvenance,
       audio: this.audio,
       // Enable fast guest _lread stubs by default; ?fast-files=0 restores the observable slow path.
       fastFileRead:

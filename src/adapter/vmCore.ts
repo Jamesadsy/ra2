@@ -95,6 +95,8 @@ export interface VmCorePlatform {
   /** Defer snapshots when the Worker mailbox is full; default false preserves main-thread presentation-boundary semantics. */
   deferFrameSnapshot?: boolean;
   packedRgb565Frames?: boolean;
+  /** Opt-in native media provenance is enabled only by the RA2 loopback diagnostic route. */
+  mediaProvenance?: boolean;
   takeFrameBuffer?: (size: number) => ArrayBuffer;
   audio: VmAudioSink;
   /** Fast guest _lread stubs; ?fast-files=0 restores the per-call hypercall slow path. */
@@ -300,6 +302,12 @@ export class VmCore {
         gameProfile: game.shimProfile,
         files: preloadedFiles,
         audio: this.platform.audio,
+        mediaProvenance: this.platform.mediaProvenance === true,
+        guestLogicFrame: () => this.guestLogicFrame,
+        guestCallOrdinal: () => this.calls,
+        mainModuleBase: image.imageBase,
+        mainModuleSize: image.sizeOfImage,
+        onMediaProvenance: this.callbacks.onMediaProvenance,
         moduleName: game.executable,
         // Shared by Workers and main-thread fallback; expose only the original campaign speed control without changing speed or the clock.
         commandLineArguments: game.commandLineArguments,

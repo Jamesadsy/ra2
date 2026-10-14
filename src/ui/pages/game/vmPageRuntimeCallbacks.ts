@@ -8,6 +8,11 @@ import type { GameVmCallbacks } from '../../../app/session/runtimeEvents';
 import type { VmStatus } from '../../../app/session/runtimeEvents';
 import type { Win32Call } from '../../../vm86/win32';
 import type { VmMoviePlaybackState } from '../../../contracts/moviePlayback';
+import {
+  isLocalMediaProvenanceOptIn,
+  MediaProvenanceBuffer,
+  type MediaProvenanceSnapshot,
+} from '../../../contracts/mediaProvenance';
 import type { SupportedGameId } from '../../../games/catalog';
 import type { LiveModelId } from './experiments/modelProbe';
 import type { FrameEffectController } from '../../../app/session/frameEffectController';
@@ -17,6 +22,9 @@ import { formatNetworkStatus } from './networkStatus';
 import { activeCheatGameForPhase } from './cheatGuides';
 import { gameRunning, networkStatus } from './state/uiState';
 import type { RuntimeToolbar } from './runtimeToolbar';
+
+type MediaProvenanceProbe = (afterSequence?: number) => MediaProvenanceSnapshot;
+type MediaProvenanceWindow = Window & { __RA2MediaProvenanceProbe?: MediaProvenanceProbe };
 
 export interface VmPageRuntimeCallbackDeps {
   canvas: HTMLCanvasElement;
@@ -72,6 +80,13 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
     onAppendCall,
     setMoviePlaybackState,
   } = deps;
+  const mediaProvenanceBuffer = new MediaProvenanceBuffer(4096);
+  const mediaProvenanceProbe: MediaProvenanceProbe = (afterSequence) => mediaProvenanceBuffer.read(afterSequence);
+  const mediaProvenanceEnabled =
+    typeof window !== 'undefined' && isLocalMediaProvenanceOptIn(getSelectedGameId() ?? '', window.location);
+  if (mediaProvenanceEnabled) {
+    (window as MediaProvenanceWindow).__RA2MediaProvenanceProbe = mediaProvenanceProbe;
+  }
   return {
     onNetworkStatus(next) {
       networkStatus.set({
@@ -85,6 +100,13 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
         effects.stop();
       }
       setStatus(next);
+      if (next.phase === 'exited' && mediaProvenanceEnabled && typeof window !== 'undefined') {
+        const debugWindow = window as MediaProvenanceWindow;
+        if (debugWindow.__RA2MediaProvenanceProbe === mediaProvenanceProbe) {
+          delete debugWindow.__RA2MediaProvenanceProbe;
+        }
+        mediaProvenanceBuffer.clear();
+      }
       if (debugAutoOpen) canvas.dataset.vmStatus = JSON.stringify(next);
       toolbar.setCheatGame(activeCheatGameForPhase(getSelectedGameId(), next.phase));
       toolbar.setMapsAvailable(next.phase === 'running' && getVm() !== null);
@@ -102,6 +124,9 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
       canvas.dataset.moviePlayback = state.skippableBriefingActive ? 'skippable-briefing' : 'not-skippable';
       canvas.dataset.moviePlaybackState = JSON.stringify(state);
       setMoviePlaybackState(state);
+    },
+    onMediaProvenance(event) {
+      if (mediaProvenanceEnabled) mediaProvenanceBuffer.append(event);
     },
     onGuestResolution(resolution) {
       canvas.dataset.vmIniResolution = resolution ?? 'missing-or-unusable';

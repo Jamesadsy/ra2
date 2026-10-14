@@ -406,6 +406,9 @@ export class WorkerVmClient implements VmShell {
       case 'movie-state':
         this.callbacks.onMoviePlaybackState?.(message.state);
         break;
+      case 'media-provenance':
+        this.callbacks.onMediaProvenance?.(message.event);
+        break;
       case 'guest-resolution':
         this.callbacks.onGuestResolution?.(message.resolution);
         break;

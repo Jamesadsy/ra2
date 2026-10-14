@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { chromium, type Locator, type Page } from '@playwright/test';
 import { assessBriefingAudioHealth } from './briefingAudioHealth';
 import { assessCampaignAudioBoundary } from './campaignAudioBoundary';
+import type { MediaProvenanceSnapshot } from '../../../src/contracts/mediaProvenance';
 
 const ORIGIN = process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174';
 const MENU_FRAME_SAMPLES = 6;
@@ -30,6 +31,7 @@ const WIDE_GUEST =
   EXPECTED_GUEST_WIDTH! / EXPECTED_GUEST_HEIGHT! > 1.6;
 const EVIDENCE_DIR = process.env.RA2_BROWSER_EVIDENCE_DIR;
 const OWNER_SOURCE_MODE = process.env.RA2_BROWSER_OWNER_SOURCE === '1';
+const MEDIA_PROVENANCE_CAPTURE = process.env.RA2_BROWSER_MEDIA_PROVENANCE === '1';
 const PRESENTATION_ONLY = process.env.RA2_BROWSER_PRESENTATION_ONLY === '1';
 const LIFECYCLE_ONLY = process.env.RA2_BROWSER_LIFECYCLE_ONLY === '1';
 const CAMPAIGN_TIMELINE_ONLY = process.env.RA2_BROWSER_CAMPAIGN_TIMELINE_ONLY === '1';
@@ -42,6 +44,15 @@ const EXECUTABLE = GAME_ID === 'yr' ? 'gamemd.exe' : 'game.exe';
 const GAME_ROOT = resolve(process.env.RA2_GAME_ROOT || 'game');
 const GAME_ASSET_RESPONSES: Array<{ path: string; status: number }> = [];
 const GAME_ASSET_FAILURES: Array<{ path: string; error: string }> = [];
+if (MEDIA_PROVENANCE_CAPTURE) {
+  const origin = new URL(ORIGIN);
+  assert.equal(GAME_ID, 'ra2', 'Media provenance capture is authorized only for the RA2 source route.');
+  assert.equal(OWNER_SOURCE_MODE, true, 'Media provenance capture requires the existing local owner-source route.');
+  assert.ok(
+    ['localhost', '127.0.0.1', '::1', '[::1]'].includes(origin.hostname.toLowerCase()),
+    'Media provenance capture requires a loopback origin.',
+  );
+}
 // clickLogical takes normalized 1440x900 coordinates; RA2 and YR sidebars have different actual horizontal positions.
 const MAIN_SINGLE_PLAYER: readonly [number, number] =
   GAME_ID === 'yr' || FOUR_THREE_GUEST ? [1288, 330] : WIDE_GUEST ? [1080, 330] : [1034, 371];
@@ -103,12 +114,14 @@ interface CampaignTimelineRow {
   directSoundCalls: Record<string, number>;
   directSoundPlayDelta: number;
   audio: AudioProgressProbe | null;
+  mediaProvenance: MediaProvenanceSnapshot | null;
 }
 
 async function readCampaignTimelineRow(
   page: Page,
+  afterMediaSequence = 0,
 ): Promise<Omit<CampaignTimelineRow, 'hostElapsedMs' | 'directSoundPlayDelta'>> {
-  return page.evaluate(() => {
+  return page.evaluate((sequence) => {
     const canvas = document.querySelector<HTMLCanvasElement>('#screen');
     if (!canvas) throw new Error('RA2 screen canvas disappeared during the campaign timeline capture.');
     const parseCalls = (raw: string | undefined): Record<string, number> => {
@@ -120,6 +133,11 @@ async function readCampaignTimelineRow(
     };
     const audioProbe = (window as Window & { __RA2AudioProgressProbe?: () => AudioProgressProbe })
       .__RA2AudioProgressProbe;
+    const provenanceProbe = (
+      window as Window & {
+        __RA2MediaProvenanceProbe?: (afterSequence?: number) => MediaProvenanceSnapshot;
+      }
+    ).__RA2MediaProvenanceProbe;
     return {
       capturedAt: new Date().toISOString(),
       browserMonotonicMs: performance.now(),
@@ -134,8 +152,9 @@ async function readCampaignTimelineRow(
       binkCalls: parseCalls(canvas.dataset.vmBinkCalls),
       directSoundCalls: parseCalls(canvas.dataset.vmAudioCalls),
       audio: audioProbe?.() ?? null,
+      mediaProvenance: provenanceProbe?.(sequence) ?? null,
     };
-  });
+  }, afterMediaSequence);
 }
 
 async function beginNativePerformanceCapture(page: Page): Promise<void> {
@@ -879,13 +898,15 @@ async function collectCampaignTimeline(
   let lastMediaActivityMs = 0;
   let lastBinkSignature = JSON.stringify(binkBaseline);
   let previousPlayCount = audioBaseline['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
+  let lastMediaProvenanceSequence = 0;
   let openScreenshotCaptured = false;
   let closeScreenshotCaptured = false;
 
   const sampler = (async () => {
     while (!stopSampling) {
       try {
-        const captured = await readCampaignTimelineRow(page);
+        const captured = await readCampaignTimelineRow(page, lastMediaProvenanceSequence);
+        if (captured.mediaProvenance) lastMediaProvenanceSequence = captured.mediaProvenance.lastSequence;
         const hostElapsedMs = Date.now() - startedAtMs;
         const playCount = captured.directSoundCalls['DSOUND.COM!IDirectSoundBuffer.Play'] ?? 0;
         const row: CampaignTimelineRow = {
@@ -1009,6 +1030,14 @@ async function collectCampaignTimeline(
     nativeObservations,
     nativeReports: performanceReports,
     finalRow: timeline.at(-1) ?? null,
+    mediaProvenanceCaptureEnabled: MEDIA_PROVENANCE_CAPTURE,
+    mediaProvenanceEventCounts: timeline
+      .flatMap((row) => row.mediaProvenance?.events ?? [])
+      .reduce<Record<string, number>>((counts, event) => {
+        const key = `${event.domain}:${event.action}`;
+        counts[key] = (counts[key] ?? 0) + 1;
+        return counts;
+      }, {}),
     screenshotFiles: EVIDENCE_DIR
       ? [
           ...(openScreenshotCaptured ? [`${GAME_ID}-field-transmission-open.png`] : []),
@@ -1401,9 +1430,12 @@ try {
     console.error(`❌ ${GAME_LABEL} pageerror：${detail}`);
   });
   page.on('crash', () => console.error(`❌ ${GAME_LABEL} Chromium renderer crashed`));
-  await page.goto(`${ORIGIN}/?debug=1${OWNER_SOURCE_MODE ? '&ea108-local-owner=1' : ''}`, {
-    waitUntil: 'domcontentloaded',
-  });
+  await page.goto(
+    `${ORIGIN}/?debug=1${OWNER_SOURCE_MODE ? '&ea108-local-owner=1' : ''}${MEDIA_PROVENANCE_CAPTURE ? '&media-provenance=1' : ''}`,
+    {
+      waitUntil: 'domcontentloaded',
+    },
+  );
   const canvas = page.locator('#screen');
   if (TAP_TO_START) {
     const tapToStart = page.locator('#ios-tap-to-start');

@@ -14,6 +14,18 @@ import type { Constructor } from './state';
 
 type WinmmChain = InstanceType<ReturnType<typeof withWinmm>>;
 
+interface SoundProvenanceState {
+  id: string;
+  rootId: string;
+  rootCreatorModule: string | null;
+  rootCreatorRva: number | null;
+  producerClass: 'bink-codec' | 'main-executable' | 'other-module' | 'unknown';
+  createdByModule: string | null;
+  createdByRva: number | null;
+  createdAtMs: number;
+  lastCursorSampleAtMs: number;
+}
+
 export const DDRAW_METHODS: Array<[string, number]> = [
   ['QueryInterface', 12],
   ['AddRef', 4],
@@ -361,6 +373,8 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
     /** The native battlefield loop calls BLOCKBEGIN twice consecutively; the pair should consume only one refresh period. */
     private vblankPairSecondCall = false;
     private readonly clipperWindows = new Map<number, number>();
+    private nextSoundProvenanceId = 0;
+    private readonly soundProvenance = new Map<number, SoundProvenanceState>();
     private readonly streamTraces = new Map<
       number,
       {
@@ -371,6 +385,82 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
         fromWriteCursorObserved: boolean;
       }
     >();
+
+    private createSoundProvenance(
+      caller: { moduleName: string | null; rva: number | null },
+      source?: SoundProvenanceState,
+    ): SoundProvenanceState | null {
+      if (!this.options.mediaProvenance) return null;
+      const id = `dsb-${(++this.nextSoundProvenanceId).toString().padStart(4, '0')}`;
+      const module = caller.moduleName?.toUpperCase() ?? null;
+      const executableName = this.moduleName.replace(/\\/g, '/').split('/').at(-1)?.toUpperCase() ?? null;
+      const producerClass =
+        source?.producerClass ??
+        (module === 'BINKW32.DLL'
+          ? 'bink-codec'
+          : module && module === executableName
+            ? 'main-executable'
+            : module
+              ? 'other-module'
+              : 'unknown');
+      return {
+        id,
+        rootId: source?.rootId ?? id,
+        rootCreatorModule: source?.rootCreatorModule ?? module,
+        rootCreatorRva: source?.rootCreatorRva ?? caller.rva,
+        producerClass,
+        createdByModule: module,
+        createdByRva: caller.rva,
+        createdAtMs: this.audioNow(),
+        lastCursorSampleAtMs: 0,
+      };
+    }
+
+    private recordSoundProvenance(
+      action: string,
+      buffer: SoundBufferState,
+      details: Record<string, string | number | boolean | null>,
+    ): void {
+      if (!this.options.mediaProvenance) return;
+      const identity = this.soundProvenance.get(buffer.object);
+      if (!identity) return;
+      this.recordMediaProvenance('directsound', action, {
+        bufferId: identity.id,
+        rootBufferId: identity.rootId,
+        producerClass: identity.producerClass,
+        rootCreatorModule: identity.rootCreatorModule,
+        rootCreatorRva: identity.rootCreatorRva,
+        createdByModule: identity.createdByModule,
+        createdByRva: identity.createdByRva,
+        contentClass: 'unknown',
+        transmissionOwned: null,
+        byteLength: buffer.size,
+        sampleRateHz: buffer.format.nSamplesPerSec,
+        channels: buffer.format.nChannels,
+        bitsPerSample: buffer.format.wBitsPerSample,
+        blockAlign: buffer.format.nBlockAlign,
+        frequencyHz: buffer.frequency,
+        playing: buffer.playing,
+        looping: buffer.looping,
+        ...details,
+      });
+    }
+
+    private sampleSoundCursor(buffer: SoundBufferState, playBytes: number, writeBytes: number): void {
+      if (!this.options.mediaProvenance) return;
+      const callOrdinal = this.options.guestCallOrdinal?.() ?? 0;
+      if (callOrdinal > 0 && callOrdinal % 256 !== 0) return;
+      const identity = this.soundProvenance.get(buffer.object);
+      if (!identity) return;
+      const now = this.audioNow();
+      if (identity.lastCursorSampleAtMs > 0 && now - identity.lastCursorSampleAtMs < 500) return;
+      identity.lastCursorSampleAtMs = now;
+      this.recordSoundProvenance('cursor-sample', buffer, {
+        playCursorBytes: playBytes,
+        writeCursorBytes: writeBytes,
+        sampledVia: 'existing-guest-GetCurrentPosition-call',
+      });
+    }
 
     /** Read-only bounded diagnostic state; samples never include PCM bytes or owner file names. */
     getSoundStreamingTraces(): SoundStreamingTrace[] {
@@ -763,7 +853,21 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
         return { eax: 0 };
       }
       if (method === 'AddRef') return { eax: this.addComRef(thisPtr) };
-      if (method === 'Release') return { eax: this.releaseComObject(thisPtr) };
+      if (method === 'Release') {
+        const buffer = this.soundBuffers.get(thisPtr);
+        const referenceCount = this.allocations.has(thisPtr) ? this.readU32(thisPtr + 4) : 0;
+        if (buffer && referenceCount <= 1) {
+          this.recordSoundProvenance('destroy', buffer, {
+            lifetimeMs: Math.max(
+              0,
+              this.audioNow() - (this.soundProvenance.get(thisPtr)?.createdAtMs ?? this.audioNow()),
+            ),
+            referenceCountBeforeRelease: referenceCount,
+          });
+          this.soundProvenance.delete(thisPtr);
+        }
+        return { eax: this.releaseComObject(thisPtr) };
+      }
 
       if (tag === COM_TAG_SOUND || (tag === undefined && key.startsWith('DSOUND.COM!IDirectSound.'))) {
         switch (method) {
@@ -796,6 +900,19 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
               !primary &&
               !!this.gameProfile.uncachedAudioProducerDlls?.some((dll) => this.guestCallerInDll(call.stack, dll));
             const buffer = this.createSoundBuffer(this.readU32(a[1] + 8), format, uncachedPosition);
+            if (buffer && this.options.mediaProvenance) {
+              const identity = this.createSoundProvenance(this.guestCallerIdentity(call.stack));
+              if (identity) {
+                this.soundProvenance.set(buffer.object, identity);
+                this.recordSoundProvenance('create', buffer, {
+                  producerEvidence:
+                    identity.producerClass === 'bink-codec'
+                      ? 'creator return address is inside BINKW32.DLL'
+                      : 'creator module recorded; content role unresolved',
+                  uncachedPositionProducerFlag: uncachedPosition,
+                });
+              }
+            }
             this.writeU32(a[2], buffer?.object ?? 0);
             return { eax: buffer ? 0 : OUT_OF_MEMORY };
           }
@@ -812,6 +929,17 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
             duplicate.volume = source.volume;
             duplicate.pan = source.pan;
             duplicate.frequency = source.frequency;
+            if (this.options.mediaProvenance) {
+              const sourceIdentity = this.soundProvenance.get(source.object);
+              const identity = this.createSoundProvenance(this.guestCallerIdentity(call.stack), sourceIdentity);
+              if (identity) {
+                this.soundProvenance.set(duplicate.object, identity);
+                this.recordSoundProvenance('duplicate', duplicate, {
+                  sourceBufferId: sourceIdentity?.id ?? null,
+                  sourceAttribution: sourceIdentity ? 'inherited-from-buffer-creation' : 'unknown',
+                });
+              }
+            }
             this.options.audio?.duplicateBuffer(source.object, duplicate.object);
             this.options.audio?.setCurrentPosition(duplicate.object, duplicate.position);
             this.options.audio?.setVolume(duplicate.object, duplicate.volume);
@@ -840,6 +968,7 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
             {
               const cursors = this.soundBufferCursors(buffer);
               const position = cursors.play;
+              this.sampleSoundCursor(buffer, position, cursors.write);
               const streamTrace = this.streamTraces.get(buffer.object);
               if (streamTrace) {
                 const now = this.audioNow();
@@ -949,17 +1078,37 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
               // DirectSound Play is a no-op when already playing with unchanged flags. Bink repeats it each frame;
               // do not keep messaging the main thread for identical state.
               if (buffer.playing && buffer.looping === nextLooping) return { eax: 0 };
+              const previousPlaying = buffer.playing;
+              const previousLooping = buffer.looping;
               if (!buffer.playing) buffer.startedAt = this.audioNow();
               buffer.playing = true;
               buffer.looping = nextLooping;
+              const caller = this.options.mediaProvenance ? this.guestCallerIdentity(call.stack) : null;
+              this.recordSoundProvenance('play', buffer, {
+                loopFlag: nextLooping,
+                previousPlaying,
+                previousLooping,
+                callerModule: caller?.moduleName ?? null,
+                callerRva: caller?.rva ?? null,
+              });
             }
             this.invalidateSoundBufferPosition(buffer);
             this.options.audio?.play(buffer.object, { loop: buffer.looping });
             return { eax: 0 };
           case 'Stop':
-            buffer.position = this.soundBufferPosition(buffer);
-            buffer.startedAt = this.audioNow();
-            buffer.playing = false;
+            {
+              const previousPlaying = buffer.playing;
+              buffer.position = this.soundBufferPosition(buffer);
+              buffer.startedAt = this.audioNow();
+              buffer.playing = false;
+              const caller = this.options.mediaProvenance ? this.guestCallerIdentity(call.stack) : null;
+              this.recordSoundProvenance('stop', buffer, {
+                previousPlaying,
+                finalEstimatedCursorBytes: buffer.position,
+                callerModule: caller?.moduleName ?? null,
+                callerRva: caller?.rva ?? null,
+              });
+            }
             this.invalidateSoundBufferPosition(buffer);
             this.options.audio?.stop(buffer.object);
             return { eax: 0 };
@@ -968,6 +1117,14 @@ export function withDirectx<TBase extends Constructor<WinmmChain>>(Base: TBase) 
             buffer.startedAt = this.audioNow();
             this.invalidateSoundBufferPosition(buffer);
             this.options.audio?.setCurrentPosition(buffer.object, buffer.position);
+            {
+              const caller = this.options.mediaProvenance ? this.guestCallerIdentity(call.stack) : null;
+              this.recordSoundProvenance('cursor-set', buffer, {
+                cursorBytes: buffer.position,
+                callerModule: caller?.moduleName ?? null,
+                callerRva: caller?.rva ?? null,
+              });
+            }
             return { eax: 0 };
           case 'SetFormat':
             if (!a[1]) return { eax: 0x8000_4003 };

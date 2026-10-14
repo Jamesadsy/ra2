@@ -521,6 +521,7 @@ export class VmWorkerController {
       },
       onShellPage: (title) => this.post({ type: 'shell-page', title }),
       onMoviePlaybackState: (state) => this.post({ type: 'movie-state', state }),
+      onMediaProvenance: config.mediaProvenance ? (event) => this.post({ type: 'media-provenance', event }) : undefined,
     };
     const probe = new BrowserEmulatorProbe();
     const platform: VmCorePlatform = {
@@ -537,6 +538,7 @@ export class VmWorkerController {
       scheduleFrame: (emit) => this.scheduleFrameWithBackpressure(emit),
       deferFrameSnapshot: true,
       packedRgb565Frames: true,
+      mediaProvenance: config.mediaProvenance === true,
       takeFrameBuffer: (size) => this.frameBuffers.take(size),
       audio: this.dependencies.audio ?? (this.audioProxy = new ProxyAudioSink(this.post)),
       fastFileRead: config.fastFileRead,

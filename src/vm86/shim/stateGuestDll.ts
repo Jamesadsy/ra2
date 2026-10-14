@@ -147,6 +147,28 @@ export function withShimGuestDll<TBase extends Constructor<ShimFilesChain>>(Base
       return caller >= module.base && caller - module.base < module.size;
     }
 
+    /** Return logical module identity and RVA for an already loaded guest caller, without exposing guest addresses. */
+    protected guestCallerIdentity(stack: number): { moduleName: string | null; rva: number | null } {
+      if (!stack) return { moduleName: null, rva: null };
+      try {
+        const caller = this.readU32(stack) >>> 0;
+        for (const module of this.loadedGuestDlls.values()) {
+          if (caller >= module.base && caller - module.base < module.size) {
+            return { moduleName: module.name.toUpperCase(), rva: caller - module.base };
+          }
+        }
+        const base = this.options.mainModuleBase ?? 0;
+        const size = this.options.mainModuleSize ?? 0;
+        if (base && caller >= base && caller - base < size) {
+          const name = this.moduleName.replace(/\\/g, '/').split('/').at(-1)?.toUpperCase() ?? null;
+          return { moduleName: name, rva: caller - base };
+        }
+      } catch {
+        // A malformed caller frame is simply unattributed.
+      }
+      return { moduleName: null, rva: null };
+    }
+
     /**
      * Initialize bundled DLLs before the main EXE entry and replace its static IAT with actual exports. Function-pointer arguments such as BinkSetSoundSystem -> BinkOpenDirectSound must not retain hypercall stubs.
      */
